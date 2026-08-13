@@ -218,25 +218,20 @@ async function signOut() {
 async function loadAllData() {
   state.loading = true; render();
   try {
-    const [p, s, nt, gt, sc, n, r, a] = await Promise.all([
-      sb.from('players').select('*').eq('space_id', SPACE_ID).order('last_name'),
-      sb.from('seasons').select('*').eq('space_id', SPACE_ID).order('start_date', { ascending: false }),
-      sb.from('night_types').select('*').eq('space_id', SPACE_ID).eq('is_active', true),
-      sb.from('game_types').select('*').eq('space_id', SPACE_ID).eq('is_active', true),
-      sb.from('space_config').select('*').eq('space_id', SPACE_ID).single(),
-      sb.from('nights').select('*, night_types(name, counts_match_points)').eq('space_id', SPACE_ID).order('date', { ascending: false }),
-      sb.from('results').select('*').eq('space_id', SPACE_ID),
-      sb.from('accolades').select('*').eq('space_id', SPACE_ID),
-    ]);
-    state.players = p.data || [];
-    state.seasons = s.data || [];
-    state.nightTypes = nt.data || [];
-    state.gameTypes = gt.data || [];
-    state.spaceConfig = sc.data || null;
-    state.nights = n.data || [];
-    state.results = r.data || [];
-    state.accolades = a.data || [];
-  } catch(e) { showToast('Error loading data', 'error'); }
+    const run = async (q) => { const { data, error } = await q; if (error) console.error('Query error:', error.message, error); return data || []; };
+    const runSingle = async (q) => { const { data, error } = await q; if (error) console.error('Query error:', error.message, error); return data || null; };
+
+    state.players    = await run(sb.from('players').select('*').eq('space_id', SPACE_ID).order('last_name'));
+    state.seasons    = await run(sb.from('seasons').select('*').eq('space_id', SPACE_ID).order('start_date', { ascending: false }));
+    state.nightTypes = await run(sb.from('night_types').select('*').eq('space_id', SPACE_ID).eq('is_active', true));
+    state.gameTypes  = await run(sb.from('game_types').select('*').eq('space_id', SPACE_ID).eq('is_active', true));
+    state.spaceConfig = await runSingle(sb.from('space_config').select('*').eq('space_id', SPACE_ID).single());
+    state.nights     = await run(sb.from('nights').select('*').eq('space_id', SPACE_ID).order('date', { ascending: false }));
+    state.results    = await run(sb.from('results').select('*').eq('space_id', SPACE_ID));
+    state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
+
+    console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
+  } catch(e) { console.error('loadAllData error:', e); showToast('Error loading data', 'error'); }
   state.loading = false; render();
 }
 
