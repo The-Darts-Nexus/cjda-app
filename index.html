@@ -780,7 +780,7 @@ function renderModal() {
   const canEditStatus = isAdmin();
   return `
     <div class="modal-overlay" onclick="if(event.target===this)state.modal=null;render()">
-      <div class="modal">
+      <div class="modal" onclick="event.stopPropagation()">
         <div style="padding:14px 16px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">${isEdit?'EDIT PLAYER':'ADD PLAYER'}</div>
           <button class="btn btn-ghost" style="padding:2px 8px" onclick="state.modal=null;render()">✕</button>
