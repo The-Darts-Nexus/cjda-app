@@ -242,7 +242,7 @@ async function loadAllData() {
     state.results    = await run(sb.from('results').select('*').eq('space_id', SPACE_ID));
     state.blocks       = await run(sb.from('blocks').select('*').eq('space_id', SPACE_ID));
     state.blockPlayers = await run(sb.from('block_players').select('*').eq('space_id', SPACE_ID));
-    state.gdfEvents    = await run(sb.from('gdf_events').select('*').eq('space_id', SPACE_ID).order('date'));
+    state.gdfEvents    = await run(sb.from('gdf_events').select('id,name,date,end_date,event_type').eq('space_id', SPACE_ID).order('date'));
     state.gdfAttendance= await run(sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
@@ -319,20 +319,34 @@ function getCompStandings(nightId) {
   });
 }
 
+
+function fmtGdfDate(startStr, endStr) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const s = new Date(startStr + 'T00:00:00');
+  const sd = s.getDate();
+  const sm = months[s.getMonth()];
+
+  if (!endStr) return sd + ' ' + sm;
+
+  const e = new Date(endStr + 'T00:00:00');
+  const ed = e.getDate();
+  const em = months[e.getMonth()];
+
+  if (sm === em) return sd + ' - ' + ed + ' ' + sm;
+  return sd + ' ' + sm + ' - ' + ed + ' ' + em;
+}
+
 function renderGdfCalendar() {
   if (!state.gdfEvents || !state.gdfEvents.length) {
     return '<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.78rem">No GDF events recorded yet. Admin can add events via the + Add Event button.</div>';
   }
   const players = state.players.filter(p => p.status === 'registered').sort((a,b) => a.last_name.localeCompare(b.last_name));
   const events = state.gdfEvents;
-  const typeLabel = { johannesburg: 'JHB', gauteng: 'GPT', wednesday: 'WED' };
-
   let headerCells = '';
   events.forEach(e => {
-    headerCells += '<th style="padding:4px 8px;text-align:center;color:var(--text-muted);font-size:0.62rem;border-bottom:1px solid var(--border);white-space:nowrap;min-width:60px">'
-      + '<div style="font-weight:700;color:var(--green-accent)">' + (typeLabel[e.event_type]||'GDF') + '</div>'
-      + '<div>' + formatDate(e.date) + '</div>'
-      + '<div style="font-size:0.58rem;color:var(--text-muted)">' + e.name + '</div>'
+    headerCells += '<th style="padding:5px 8px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);white-space:nowrap;min-width:70px;vertical-align:bottom">'
+      + '<div style="font-weight:700;color:var(--text);font-size:0.68rem;margin-bottom:2px">' + e.name + '</div>'
+      + '<div style="color:var(--green-accent);font-family:\'Share Tech Mono\',monospace;font-size:0.65rem">' + fmtGdfDate(e.date, e.end_date) + '</div>'
       + '</th>';
   });
 
