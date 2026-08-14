@@ -367,20 +367,22 @@ function renderGdfCalendar() {
       }
     });
     rows += '<tr style="' + (i%2===0?'':'background:rgba(45,106,45,0.05)') + '">'
-      + '<td style="padding:4px 8px;font-weight:600;font-size:0.75rem;white-space:nowrap;border-bottom:1px solid var(--border)">' + p.first_name + ' ' + p.last_name + '</td>'
+      + '<td style="padding:4px 8px;font-weight:600;font-size:0.75rem;white-space:nowrap;border-bottom:1px solid var(--border);position:sticky;left:0;z-index:1;background:' + (i%2===0?'var(--card)':'rgba(28,58,28,0.95)') + '">' + p.first_name + ' ' + p.last_name + '</td>'
       + cells
-      + '<td style="padding:4px 8px;text-align:center;font-weight:700;color:var(--green-accent);border-bottom:1px solid var(--border)">' + total + '</td>'
+      + '<td style="padding:4px 8px;text-align:center;font-weight:700;color:var(--green-accent);border-bottom:1px solid var(--border);position:sticky;right:0;z-index:1;background:' + (i%2===0?'var(--card)':'rgba(28,58,28,0.95)') + '">' + total + '</td>'
       + '</tr>';
   });
 
-  return '<table style="width:100%;border-collapse:collapse;font-size:0.75rem">'
+  return '<div style="overflow-x:auto">'
+    + '<table style="border-collapse:collapse;font-size:0.75rem">'
     + '<thead><tr style="background:var(--green-dark)">'
-    + '<th style="padding:4px 8px;text-align:left;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Player</th>'
+    + '<th style="padding:4px 8px;text-align:left;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);position:sticky;left:0;z-index:2;background:var(--green-dark);white-space:nowrap;min-width:140px">Player</th>'
     + headerCells
-    + '<th style="padding:4px 8px;text-align:center;color:var(--green-accent);font-size:0.65rem;border-bottom:1px solid var(--border)">Total</th>'
+    + '<th style="padding:4px 8px;text-align:center;color:var(--green-accent);font-size:0.65rem;border-bottom:1px solid var(--border);position:sticky;right:0;z-index:2;background:var(--green-dark)">Total</th>'
     + '</tr></thead>'
     + '<tbody>' + rows + '</tbody>'
-    + '</table>';
+    + '</table>'
+    + '</div>';
 }
 
 async function toggleGdfAttendance(eventId, playerId, attended) {
