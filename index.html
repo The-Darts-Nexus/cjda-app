@@ -102,6 +102,10 @@
   @media (max-width: 640px) {
     .hide-mobile { display: none !important; }
     .stack-mobile { flex-direction: column !important; }
+    .home-grid { grid-template-columns: 1fr !important; }
+  }
+  @media (max-width: 900px) {
+    .home-grid { grid-template-columns: 1fr 1fr !important; }
   }
 </style>
 </head>
@@ -945,6 +949,9 @@ function renderHome() {
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:12px">
 
+      <!-- 3-column layout: Standings | Accolades | Last Night -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;align-items:start" class="home-grid">
+
       <!-- Season Standings -->
       <div class="card" style="overflow:hidden">
         <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
@@ -985,17 +992,6 @@ function renderHome() {
         </div>
       </div>
 
-      <!-- Competition Results -->
-      <div class="card" style="overflow:hidden">
-        <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">COMPETITION RESULTS</div>
-          <div style="font-size:0.68rem;color:var(--text-muted)">Top 3 per competition</div>
-        </div>
-        <div style="padding:10px 12px;overflow-x:auto">
-          ${renderHomeCompetitions()}
-        </div>
-      </div>
-
       <!-- Last Night Block Results -->
       <div class="card" style="overflow:hidden">
         <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
@@ -1006,6 +1002,19 @@ function renderHome() {
           ${!lastNight
             ? `<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No nights submitted yet.</div>`
             : `<div style="font-size:0.78rem;color:var(--text-muted);text-align:center;padding:12px">Block results coming soon — requires block/player data.</div>`}
+        </div>
+      </div>
+
+      </div><!-- end 3-col grid -->
+
+      <!-- Competition Results -->
+      <div class="card" style="overflow:hidden">
+        <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">COMPETITION RESULTS</div>
+          <div style="font-size:0.68rem;color:var(--text-muted)">Top 3 per competition</div>
+        </div>
+        <div style="padding:10px 12px;overflow-x:auto">
+          ${renderHomeCompetitions()}
         </div>
       </div>
 
@@ -1129,10 +1138,10 @@ function renderSeasonLog() {
             <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.1em">GDF CALENDAR — ATTENDANCE</div>
             <div style="font-size:0.68rem;color:var(--text-muted)">1 point per GDF event attended</div>
           </div>
-          \${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="openAddGdfEvent()">+ Add Event</button>' : ''}
+          ${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="openAddGdfEvent()">+ Add Event</button>' : ''}
         </div>
         <div style="overflow-x:auto">
-          \${renderGdfCalendar()}
+          ${renderGdfCalendar()}
         </div>
       </div>
     </div>`;
@@ -1579,13 +1588,13 @@ function renderConfig() {
           <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">SEASONS</div>
         </div>
         <table class="data-table">
-          <thead><tr><th>Season</th><th>Start</th><th>End</th><th>Active</th></tr></thead>
+          <thead><tr><th>Season</th><th>Season Points</th><th>Selection Points</th><th>Active</th></tr></thead>
           <tbody>
             ${state.seasons.map(s => `
               <tr>
                 <td style="font-weight:600">${s.name}</td>
-                <td class="mono" style="font-size:0.72rem">${formatDate(s.start_date)}</td>
-                <td class="mono" style="font-size:0.72rem">${s.end_date ? formatDate(s.end_date) : '—'}</td>
+                <td class="mono" style="font-size:0.72rem">${s.season_points_start ? formatDate(s.season_points_start) + ' → ' + formatDate(s.season_points_end) : formatDate(s.start_date)}</td>
+                <td class="mono" style="font-size:0.72rem">${s.selection_points_start ? formatDate(s.selection_points_start) + ' → ' + formatDate(s.selection_points_end) : '—'}</td>
                 <td><span class="pill pill-${s.is_active?'registered':'temp'}">${s.is_active?'Active':'Closed'}</span></td>
               </tr>`).join('')}
           </tbody>
