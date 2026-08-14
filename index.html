@@ -136,6 +136,9 @@ const state = {
   tab: 'home',
   lightMode: false,
   loading: false,
+  activeNight: null,        // night being worked on
+  activeBlockIdx: 0,        // which block tab is active
+  nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
   // Data
   players: [],
   seasons: [],
@@ -259,9 +262,198 @@ async function saveNight() {
     notes: state.modal.data.notes || ''
   }).select().single();
   if (error) { showToast(error.message, 'error'); return; }
-  showToast('Night created! Block entry coming in next build.');
+  showToast('Night created!');
   state.modal = null;
   await loadAllData();
+  // Navigate to block entry for this night
+  openNightEntry(data.id);
+}
+
+function openNightEntry(nightId) {
+  const night = state.nights.find(n => n.id === nightId);
+  if (!night) return;
+  state.activeNight = night;
+  state.activeBlockIdx = 0;
+  state.nightBlocks = [];
+  addBlock(); // start with one empty block
+  render();
+}
+
+function addBlock() {
+  const size = 4;
+  state.nightBlocks.push({
+    label: `Block ${state.nightBlocks.length + 1}`,
+    size,
+    slots: Array(size).fill(null),
+    legs: Array.from({length: size}, () => Array(size).fill(0)),
+    accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 })),
+    bonus: 0
+  });
+  state.activeBlockIdx = state.nightBlocks.length - 1;
+  render();
+}
+
+function removeLastBlock() {
+  if (state.nightBlocks.length <= 1) return;
+  state.nightBlocks.pop();
+  state.activeBlockIdx = Math.min(state.activeBlockIdx, state.nightBlocks.length - 1);
+  render();
+}
+
+function setBlockSize(blockIdx, size) {
+  const b = state.nightBlocks[blockIdx];
+  b.size = size;
+  b.slots = Array(size).fill(null).map((_, i) => b.slots[i] || null);
+  b.legs = Array.from({length: size}, (_, r) => Array.from({length: size}, (_, c) => (b.legs[r] && b.legs[r][c]) || 0));
+  b.accolades = Array.from({length: size}, (_, i) => b.accolades[i] || { '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 });
+  render();
+}
+
+function setBlockSlot(blockIdx, slotIdx, playerId) {
+  state.nightBlocks[blockIdx].slots[slotIdx] = playerId || null;
+  render();
+}
+
+function updateLeg(blockIdx, row, col, val) {
+  const v = Math.max(0, Math.min(3, parseInt(val) || 0));
+  state.nightBlocks[blockIdx].legs[row][col] = v;
+  render();
+}
+
+function updateAccolade(blockIdx, slotIdx, type, val) {
+  if (type === 'hc_value') {
+    state.nightBlocks[blockIdx].accolades[slotIdx].hc_value = val;
+  } else {
+    state.nightBlocks[blockIdx].accolades[slotIdx][type] = Math.max(0, parseInt(val) || 0);
+  }
+}
+
+function updateBonus(blockIdx, val) {
+  state.nightBlocks[blockIdx].bonus = Math.max(0, parseInt(val) || 0);
+  render();
+}
+
+function calcBlockStats(blockIdx) {
+  const b = state.nightBlocks[blockIdx];
+  return b.slots.map((_, r) => {
+    if (!b.slots[r]) return null;
+    let legsWon = 0, gamesWon = 0;
+    for (let c = 0; c < b.size; c++) {
+      if (c === r) continue;
+      const myLegs = b.legs[r][c] || 0;
+      const oppLegs = b.legs[c][r] || 0;
+      legsWon += myLegs;
+      if (myLegs > oppLegs) gamesWon++;
+    }
+    const gamesPlayed = b.slots.filter((s, i) => i !== r && s).length;
+    const gwPoints = gamesWon * 2;
+    const totalPoints = legsWon + gwPoints + (b.bonus || 0);
+    return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints };
+  });
+}
+
+function getBlockPositions(blockIdx) {
+  const stats = calcBlockStats(blockIdx);
+  const b = state.nightBlocks[blockIdx];
+  const ranked = stats
+    .map((s, i) => ({ i, total: s ? s.totalPoints : -1 }))
+    .filter(x => b.slots[x.i])
+    .sort((a, z) => z.total - a.total);
+  const positions = Array(b.size).fill(null);
+  ranked.forEach((r, pos) => { positions[r.i] = pos + 1; });
+  return positions;
+}
+
+async function submitNight() {
+  if (!state.activeNight) return;
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+
+  // Validate all blocks have at least some players
+  const hasData = state.nightBlocks.some(b => b.slots.some(s => s));
+  if (!hasData) { showToast('Please assign players to blocks first', 'error'); return; }
+
+  state.loading = true; render();
+
+  try {
+    const seasonId = getActiveSeasonId();
+
+    for (const b of state.nightBlocks) {
+      // Insert block
+      const { data: blockData, error: blockErr } = await sb.from('blocks').insert({
+        space_id: SPACE_ID,
+        night_id: state.activeNight.id,
+        game_type_id: state.gameTypes[0]?.id || null,
+        block_label: b.label,
+        size: b.size,
+        bonus: b.bonus || 0,
+        status: 'locked'
+      }).select().single();
+      if (blockErr) throw blockErr;
+
+      // Insert block players
+      const playerInserts = b.slots
+        .map((pid, idx) => pid ? { space_id: SPACE_ID, block_id: blockData.id, player_id: pid, slot_index: idx } : null)
+        .filter(Boolean);
+      if (playerInserts.length) {
+        const { error: bpErr } = await sb.from('block_players').insert(playerInserts);
+        if (bpErr) throw bpErr;
+      }
+
+      // Insert results (all match pairs)
+      const resultInserts = [];
+      for (let r = 0; r < b.size; r++) {
+        for (let c = r + 1; c < b.size; c++) {
+          if (!b.slots[r] || !b.slots[c]) continue;
+          resultInserts.push({
+            space_id: SPACE_ID,
+            block_id: blockData.id,
+            night_id: state.activeNight.id,
+            season_id: seasonId,
+            home_player_id: b.slots[r],
+            away_player_id: b.slots[c],
+            home_legs: b.legs[r][c] || 0,
+            away_legs: b.legs[c][r] || 0
+          });
+        }
+      }
+      if (resultInserts.length) {
+        const { error: resErr } = await sb.from('results').insert(resultInserts);
+        if (resErr) throw resErr;
+      }
+
+      // Insert accolades
+      const accInserts = [];
+      b.accolades.forEach((acc, slotIdx) => {
+        const pid = b.slots[slotIdx];
+        if (!pid) return;
+        if (acc['180'] > 0) for (let i = 0; i < acc['180']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '180', value: 1 });
+        if (acc['171'] > 0) for (let i = 0; i < acc['171']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '171', value: 1 });
+        if (acc.hc > 0 && acc.hc_value) {
+          const hcVal = parseInt(acc.hc_value) || 0;
+          const accType = hcVal === 170 ? '170_close' : 'high_close';
+          for (let i = 0; i < acc.hc; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: accType, value: hcVal });
+        }
+        if (acc.l15 > 0) for (let i = 0; i < acc.l15; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '15_dart', value: 1 });
+      });
+      if (accInserts.length) {
+        const { error: accErr } = await sb.from('accolades').insert(accInserts);
+        if (accErr) throw accErr;
+      }
+    }
+
+    // Lock the night
+    await sb.from('nights').update({ status: 'locked' }).eq('id', state.activeNight.id);
+
+    showToast('Night submitted successfully!');
+    state.activeNight = null;
+    state.nightBlocks = [];
+    await loadAllData();
+
+  } catch(e) {
+    console.error('Submit error:', e);
+    showToast('Error submitting night: ' + e.message, 'error');
+  }
+  state.loading = false; render();
 }
 
 // ═══════════════════════════════════════════════
@@ -680,33 +872,189 @@ function renderAccoladeGuide() {
 // RENDER — NIGHT SETUP (Placeholder V1)
 // ═══════════════════════════════════════════════
 function renderNightSetup() {
+  // If there's an active night being entered, show block entry
+  if (state.activeNight) return renderBlockEntry();
+
   const submittedNights = state.nights.filter(n => n.status === 'submitted' || n.status === 'locked')
     .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const draftNights = state.nights.filter(n => n.status === 'draft')
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
       ${isAdmin() ? `
-        <div class="card" style="padding:12px 14px;background:var(--green-dark)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;margin-bottom:6px">NIGHT SETUP</div>
-          <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px">Create and manage league nights, block assignments and match results.</div>
+        <div class="card" style="padding:10px 12px;background:var(--green-dark);display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">NIGHT SETUP</div>
+            <div style="font-size:0.68rem;color:var(--text-muted)">Create a new league night or continue a draft</div>
+          </div>
           <button class="btn btn-primary" onclick="openCreateNight()">+ Create Night</button>
         </div>` : ''}
+
+      ${draftNights.length ? `
+        <div class="card" style="overflow:hidden">
+          <div style="padding:6px 12px;background:rgba(204,0,0,0.2);border-bottom:1px solid var(--border)">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.1em;color:#FF6666">DRAFT NIGHTS — IN PROGRESS</div>
+          </div>
+          <table class="data-table">
+            <thead><tr><th>Date</th><th>Type</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
+            <tbody>
+              ${draftNights.map(n => `<tr>
+                <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
+                <td style="color:var(--text-muted);font-size:0.75rem">${n.night_type_id ? state.nightTypes.find(nt=>nt.id===n.night_type_id)?.name||'—' : '—'}</td>
+                <td><span class="pill" style="background:rgba(204,0,0,0.2);color:#FF6666;border:1px solid rgba(204,0,0,0.3)">Draft</span></td>
+                ${isAdmin()?`<td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openNightEntry('${n.id}')">Continue →</button></td>`:''}
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+
       <div class="card" style="overflow:hidden">
-        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">NIGHT HISTORY</div>
+        <div style="padding:6px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.1em">NIGHT HISTORY</div>
         </div>
         ${!submittedNights.length
           ? `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:0.78rem">No nights submitted yet.</div>`
           : `<table class="data-table">
               <thead><tr><th>Date</th><th>Type</th><th>Status</th></tr></thead>
               <tbody>
-                ${submittedNights.map(n => `
-                  <tr>
-                    <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
-                    <td style="color:var(--text-muted);font-size:0.75rem">${n.night_types?.name || '—'}</td>
-                    <td><span class="pill pill-registered">${n.status}</span></td>
-                  </tr>`).join('')}
+                ${submittedNights.map(n => `<tr>
+                  <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
+                  <td style="color:var(--text-muted);font-size:0.75rem">${n.night_type_id ? state.nightTypes.find(nt=>nt.id===n.night_type_id)?.name||'—' : '—'}</td>
+                  <td><span class="pill pill-registered">${n.status}</span></td>
+                </tr>`).join('')}
               </tbody>
             </table>`}
+      </div>
+    </div>`;
+}
+
+function renderBlockEntry() {
+  const night = state.activeNight;
+  const nightTypeName = night.night_type_id ? state.nightTypes.find(nt=>nt.id===night.night_type_id)?.name||'League Night' : 'League Night';
+  const b = state.nightBlocks[state.activeBlockIdx];
+  if (!b) return '<div style="padding:20px;color:var(--text-muted)">Loading...</div>';
+
+  const stats = calcBlockStats(state.activeBlockIdx);
+  const positions = getBlockPositions(state.activeBlockIdx);
+  const N = b.size;
+
+  // Player dropdowns — filter already used players in this block
+  const usedInBlock = b.slots.filter(Boolean);
+  const availablePlayers = (cat) => state.players.filter(p =>
+    (cat === 'men' ? ['men','junior_boy'].includes(p.category) : ['ladies','junior_girl'].includes(p.category))
+  );
+
+  // Build table rows
+  const rows = Array.from({length: N}, (_, r) => {
+    const pid = b.slots[r];
+    const player = pid ? state.players.find(p => p.id === pid) : null;
+    const playerName = player ? `${player.first_name} ${player.last_name}`.trim() : '';
+    const s = stats[r];
+    const acc = b.accolades[r];
+
+    const legCells = Array.from({length: N}, (_, c) => {
+      if (c === r) return `<td style="background:#1A1A1A;width:32px"></td>`;
+      const val = b.legs[r][c] || 0;
+      return `<td style="padding:2px;text-align:center">
+        <input type="number" min="0" max="3" value="${val}"
+          style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.78rem;font-family:'Share Tech Mono',monospace"
+          onchange="updateLeg(${state.activeBlockIdx},${r},${c},this.value)"
+          ${!pid ? 'disabled' : ''}>
+      </td>`;
+    }).join('');
+
+    return `<tr style="${r%2===0?'':'background:rgba(45,106,45,0.05)'}">
+      <td style="padding:4px 6px;text-align:center;font-size:0.72rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;font-weight:700">${r+1}</td>
+      <td style="padding:4px 6px;min-width:130px">
+        <select style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:0.75rem;font-family:'Rajdhani',sans-serif"
+          onchange="setBlockSlot(${state.activeBlockIdx},${r},this.value)">
+          <option value="">(empty)</option>
+          ${state.players.map(p => `<option value="${p.id}" ${pid===p.id?'selected':''}>${p.first_name} ${p.last_name}</option>`).join('')}
+        </select>
+      </td>
+      ${legCells}
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesPlayed : ''}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesWon : ''}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${r===0?`<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">`:''}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc['180']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'180',this.value)" ${!pid?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc['171']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'171',this.value)" ${!pid?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center;display:flex;gap:2px;align-items:center">
+        <input type="number" min="0" value="${acc.hc||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc',this.value)" ${!pid?'disabled':''}>
+        <input type="number" min="90" max="170" value="${acc.hc_value||''}" placeholder="val" style="width:38px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc_value',this.value)" ${!pid?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc.l15||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15',this.value)" ${!pid?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center;font-weight:700;color:var(--green-accent);font-size:0.82rem">${positions[r] || ''}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div style="padding:10px;display:flex;flex-direction:column;gap:8px">
+
+      <!-- Night Header -->
+      <div class="card" style="padding:8px 12px;background:var(--green-dark);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">${nightTypeName} — ${formatDate(night.date)}</div>
+          <div style="font-size:0.68rem;color:var(--text-muted)">Enter legs won per match. Calculations update automatically.</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];render()">← Back</button>
+          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
+          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
+          <button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>
+        </div>
+      </div>
+
+      <!-- Block tabs -->
+      <div class="tab-group">
+        ${state.nightBlocks.map((bl, i) => `
+          <div class="tab-btn ${i===state.activeBlockIdx?'active':''}" onclick="state.activeBlockIdx=${i};render()">${bl.label}</div>
+        `).join('')}
+      </div>
+
+      <!-- Block size selector -->
+      <div style="display:flex;align-items:center;gap:8px">
+        <label class="form-label" style="margin:0">Players in block:</label>
+        ${[3,4,5,6].map(n => `<button class="btn ${N===n?'btn-primary':'btn-ghost'}" style="padding:3px 10px;font-size:0.72rem" onclick="setBlockSize(${state.activeBlockIdx},${n})">${n}</button>`).join('')}
+      </div>
+
+      <!-- Block sheet table -->
+      <div class="card" style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+          <thead>
+            <tr style="background:var(--green-dark)">
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Nr</th>
+              <th style="padding:5px 6px;text-align:left;color:var(--text);font-size:0.68rem;letter-spacing:0.05em;text-transform:uppercase;border-bottom:1px solid var(--border)">Player Name</th>
+              ${Array.from({length:N},(_,i)=>`<th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">${i+1}</th>`).join('')}
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GP</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GW</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Legs</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GWPts</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Bonus</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--red);font-size:0.68rem;font-weight:700;border-bottom:1px solid var(--border)">Total</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">180</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">171</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">H/C (#,val)</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">L15</th>
+              <th style="padding:5px 6px;text-align:center;color:var(--green-accent);font-size:0.65rem;font-weight:700;border-bottom:1px solid var(--border)">Pos</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+
+      <!-- Notes -->
+      <div style="font-size:0.68rem;color:var(--text-muted);padding:4px 2px">
+        Enter legs won in the matrix. Diagonal cells = no match. H/C: enter count then the value (e.g. 1 × 120). 170 automatically records as Big Fish. Submit locks the night and pushes to Season Log.
       </div>
     </div>`;
 }
