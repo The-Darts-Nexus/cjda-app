@@ -137,7 +137,11 @@ const state = {
   lightMode: false,
   loading: false,
   blocks: [],               // all blocks (for bonus lookup)
-  blockPlayers: [],          // all block_players (for attendance lookup)
+  blockPlayers: [],          // all block_players
+  gdfEvents: [],             // GDF calendar events
+  gdfAttendance: [],         // GDF attendance records
+  competitionNightId: null,  // active competition night
+  compTab: 'list',           // list | entry | view
   activeNight: null,        // night being worked on
   activeBlockIdx: 0,        // which block tab is active
   nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
@@ -146,7 +150,6 @@ const state = {
   seasons: [],
   nights: [],
   blocks: [],
-  blockPlayers: [],
   results: [],
   accolades: [],
   nightTypes: [],
@@ -235,6 +238,8 @@ async function loadAllData() {
     state.results    = await run(sb.from('results').select('*').eq('space_id', SPACE_ID));
     state.blocks       = await run(sb.from('blocks').select('*').eq('space_id', SPACE_ID));
     state.blockPlayers = await run(sb.from('block_players').select('*').eq('space_id', SPACE_ID));
+    state.gdfEvents    = await run(sb.from('gdf_events').select('*').eq('space_id', SPACE_ID).order('date'));
+    state.gdfAttendance= await run(sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
     console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
@@ -270,6 +275,44 @@ async function resubmitNight() {
     showToast('Error resubmitting: ' + e.message, 'error');
     state.loading = false; render();
   }
+}
+
+
+const COMP_NIGHT_TYPES = ['Selected Doubles','Mix Doubles','Mixed Triples','Champion of Champions','Home Alone Cup','DIDO','Open Competition'];
+
+function isCompNight(nightTypeId) {
+  const nt = state.nightTypes.find(t => t.id === nightTypeId);
+  return nt ? !nt.counts_match_points : false;
+}
+
+function getCompNights() {
+  return state.nights
+    .filter(n => isCompNight(n.night_type_id))
+    .sort((a,b) => b.date.localeCompare(a.date));
+}
+
+function getCompStandings(nightId) {
+  // Returns blocks with player standings for a competition night
+  const nightBlocks = (state.blocks || []).filter(b => b.night_id === nightId);
+  return nightBlocks.map(block => {
+    const bps = (state.blockPlayers || []).filter(bp => bp.block_id === block.id).sort((a,b)=>a.slot_index-b.slot_index);
+    const slots = bps.map(bp => bp.player_id);
+    const playerStats = slots.map(pid => {
+      const player = state.players.find(p => p.id === pid);
+      const results = state.results.filter(r => r.block_id === block.id && (r.home_player_id === pid || r.away_player_id === pid));
+      let legs=0, gw=0, gp=0;
+      results.forEach(r => {
+        const myLegs = r.home_player_id===pid ? r.home_legs : r.away_legs;
+        const oppLegs = r.home_player_id===pid ? r.away_legs : r.home_legs;
+        if (r.home_legs===0 && r.away_legs===0) return;
+        legs+=myLegs; gp++;
+        if (myLegs>oppLegs) gw++;
+      });
+      const total = legs + gw*2 + (block.bonus||0);
+      return { pid, name: player ? `${player.first_name} ${player.last_name}` : '—', legs, gw, gp, total };
+    }).sort((a,b)=>b.total-a.total);
+    return { block, label: block.block_label, players: playerStats };
+  });
 }
 
 async function refreshData() { await loadAllData(); showToast('Data refreshed'); }
@@ -818,6 +861,51 @@ function renderHeader() {
 // ═══════════════════════════════════════════════
 // RENDER — HOME PAGE
 // ═══════════════════════════════════════════════
+
+function renderHomeCompetitions() {
+  const compNights = getCompNights().filter(n => n.status === 'locked' || n.status === 'submitted');
+  if (!compNights.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No competitions recorded yet.</div>';
+
+  // Group by night type name
+  const byType = {};
+  compNights.forEach(n => {
+    const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+    const name = nt ? nt.name : 'Other';
+    if (!byType[name]) byType[name] = [];
+    byType[name].push(n);
+  });
+
+  const medal = (pos) => pos === 1 ? '🥇' : pos === 2 ? '🥈' : '🥉';
+
+  const cols = Object.entries(byType).map(([typeName, nights]) => {
+    // Use most recent completed competition for this type
+    const latest = nights[0];
+    const standings = getCompStandings(latest.id);
+    const blocks = standings.map(grp => {
+      const top3 = grp.players.slice(0,3);
+      return `
+        <div style="margin-bottom:8px">
+          <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">${grp.label}</div>
+          ${top3.map((p,i) => `
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 0">
+              <span style="font-size:0.75rem">${medal(i+1)}</span>
+              <span style="font-size:0.75rem;font-weight:${i===0?'700':'500'};color:${i===0?'var(--green-accent)':'var(--text)'}">${p.name}</span>
+              <span style="font-size:0.68rem;color:var(--text-muted);margin-left:auto">${p.total}pts</span>
+            </div>`).join('')}
+          ${!top3.length ? '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>' : ''}
+        </div>`;
+    }).join('');
+    return `
+      <div style="min-width:180px;border-right:1px solid var(--border);padding:8px 12px;flex-shrink:0">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.08em;color:var(--text);margin-bottom:4px">${typeName}</div>
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:8px">${formatDate(latest.date)}</div>
+        ${blocks || '<div style="font-size:0.72rem;color:var(--text-muted)">No block data</div>'}
+      </div>`;
+  }).join('');
+
+  return `<div style="display:flex;gap:0;min-width:max-content">${cols}</div>`;
+}
+
 function renderHome() {
   const menStandings = getStandings('men');
   const ladiesStandings = getStandings('ladies');
@@ -894,6 +982,17 @@ function renderHome() {
                     <span style="font-size:0.7rem;color:var(--text-muted)">${formatDate(a.nightDate)}</span>
                   </div>`).join('')}
               </div>`}
+        </div>
+      </div>
+
+      <!-- Competition Results -->
+      <div class="card" style="overflow:hidden">
+        <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">COMPETITION RESULTS</div>
+          <div style="font-size:0.68rem;color:var(--text-muted)">Top 3 per competition</div>
+        </div>
+        <div style="padding:10px 12px;overflow-x:auto">
+          ${renderHomeCompetitions()}
         </div>
       </div>
 
@@ -1019,6 +1118,21 @@ function renderSeasonLog() {
                 : rows}
             </tbody>
           </table>
+        </div>
+      </div>
+
+
+      <!-- GDF Calendar -->
+      <div class="card" style="overflow:hidden">
+        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.1em">GDF CALENDAR — ATTENDANCE</div>
+            <div style="font-size:0.68rem;color:var(--text-muted)">1 point per GDF event attended</div>
+          </div>
+          \${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="openAddGdfEvent()">+ Add Event</button>' : ''}
+        </div>
+        <div style="overflow-x:auto">
+          \${renderGdfCalendar()}
         </div>
       </div>
     </div>`;
@@ -1247,7 +1361,7 @@ function renderBlockEntry() {
           <div style="font-size:0.68rem;color:var(--text-muted)">Enter legs won per match. Calculations update automatically.</div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <button class="btn btn-primary" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];render()">← Back</button>
+          <button class="btn btn-primary" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];state.competitionNightId=null;render()">← Back</button>
           ${night.viewOnly ? `
             <span style="font-size:0.7rem;color:var(--text-muted);padding:2px 8px;border:1px solid var(--border);border-radius:4px">View Only</span>
             ${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight.viewOnly=false;render()">✏️ Edit</button>' : ''}
@@ -1308,13 +1422,104 @@ function renderBlockEntry() {
 // RENDER — COMPETITIONS (Placeholder V1)
 // ═══════════════════════════════════════════════
 function renderCompetitions() {
+  if (state.competitionNightId) return renderCompetitionEntry();
+
+  const compNights = getCompNights();
+  const upcoming = compNights.filter(n => n.status === 'draft');
+  const completed = compNights.filter(n => n.status === 'locked' || n.status === 'submitted');
+
   return `
-    <div style="padding:10px">
-      <div class="card" style="padding:24px;text-align:center">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:0.12em;margin-bottom:8px;color:var(--text-muted)">COMPETITIONS</div>
-        <div style="font-size:0.78rem;color:var(--text-muted)">Competition management coming in next build.</div>
+    <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
+      ${isAdmin() ? `
+        <div class="card" style="padding:10px 12px;background:var(--green-dark);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">COMPETITIONS</div>
+            <div style="font-size:0.68rem;color:var(--text-muted)">Selected Doubles, Mix Doubles, Mixed Triples, CoC, Home Alone Cup, DIDO</div>
+          </div>
+          <button class="btn btn-primary" onclick="openCreateCompetition()">+ Create Competition</button>
+        </div>` : ''}
+
+      ${upcoming.length ? `
+        <div class="card" style="overflow:hidden">
+          <div style="padding:6px 12px;background:rgba(204,0,0,0.15);border-bottom:1px solid var(--border)">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.82rem;letter-spacing:0.1em;color:#FF6666">DRAFT</div>
+          </div>
+          <table class="data-table">
+            <thead><tr><th>Date</th><th>Type</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
+            <tbody>
+              ${upcoming.map(n => `<tr>
+                <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
+                <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}</td>
+                <td><span class="pill" style="background:rgba(204,0,0,0.2);color:#FF6666;border:1px solid rgba(204,0,0,0.3)">Draft</span></td>
+                ${isAdmin()?`<td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="state.competitionNightId='${n.id}';state.activeNight=null;state.nightBlocks=[];openNightEntry('${n.id}');state.tab='competitions';render()">Enter →</button></td>`:''}
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+
+      <div class="card" style="overflow:hidden">
+        <div style="padding:6px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.82rem;letter-spacing:0.1em">COMPLETED</div>
+        </div>
+        ${!completed.length ? `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:0.78rem">No competitions recorded yet.</div>` : `
+          <table class="data-table">
+            <thead><tr><th>Date</th><th>Type</th><th>Winner</th><th></th></tr></thead>
+            <tbody>
+              ${completed.map(n => {
+                const standings = getCompStandings(n.id);
+                const winner = standings.length && standings[0].players.length ? standings[0].players[0].name : '—';
+                return `<tr>
+                  <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
+                  <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}</td>
+                  <td style="font-size:0.78rem;font-weight:600;color:var(--green-accent)">🏆 ${winner}</td>
+                  <td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewCompetition('${n.id}')">View →</button></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`}
       </div>
     </div>`;
+}
+
+function renderCompetitionEntry() {
+  // Reuse night setup block entry but with competition context
+  const savedTab = state.tab;
+  if (!state.activeNight) return renderCompetitions();
+  const entryHTML = renderBlockEntry();
+  return entryHTML;
+}
+
+function openCreateCompetition() {
+  const today = new Date().toISOString().split('T')[0];
+  const compTypes = state.nightTypes.filter(nt => !nt.counts_match_points);
+  state.modal = { mode: 'create_competition', data: { date: today, night_type_id: compTypes[0]?.id || '' } };
+  render();
+}
+
+async function saveCompetition() {
+  if (!state.modal?.data?.date) { showToast('Please select a date','error'); return; }
+  if (!state.modal?.data?.night_type_id) { showToast('Please select a competition type','error'); return; }
+  const seasonId = getActiveSeasonId();
+  const { data, error } = await sb.from('nights').insert({
+    space_id: SPACE_ID, season_id: seasonId,
+    night_type_id: state.modal.data.night_type_id,
+    date: state.modal.data.date, status: 'draft',
+    notes: state.modal.data.notes || ''
+  }).select().single();
+  if (error) { showToast(error.message,'error'); return; }
+  showToast('Competition created!');
+  state.modal = null;
+  await loadAllData();
+  state.tab = 'competitions';
+  state.competitionNightId = data.id;
+  openNightEntry(data.id);
+}
+
+async function viewCompetition(nightId) {
+  state.competitionNightId = nightId;
+  await viewNight(nightId);
+  state.tab = 'competitions';
+  render();
 }
 
 // ═══════════════════════════════════════════════
@@ -1331,6 +1536,17 @@ function renderConfig() {
         </div>
         <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px">
           <div><label class="form-label">Club Name</label><div style="font-size:0.85rem">${cfg?.club_name || '—'}</div></div>
+          ${state.seasons.filter(s=>s.space_id===SPACE_ID||s.space_id===SPACE_ID).slice(0,1).map(s=>`
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div>
+              <label class="form-label">Season Points</label>
+              <div style="font-size:0.78rem;font-family:'Share Tech Mono',monospace;color:var(--green-accent)">${s.season_points_start||s.start_date||'—'} → ${s.season_points_end||'—'}</div>
+            </div>
+            <div>
+              <label class="form-label">Selection Points</label>
+              <div style="font-size:0.78rem;font-family:'Share Tech Mono',monospace;color:var(--red)">${s.selection_points_start||'—'} → ${s.selection_points_end||'—'}</div>
+            </div>
+          </div>`).join('')}
           <div style="display:flex;gap:10px">
             <div><label class="form-label">Primary Colour</label><div style="display:flex;align-items:center;gap:6px"><div style="width:20px;height:20px;border-radius:4px;background:${cfg?.primary_colour||'#2D6A2D'}"></div><span class="mono" style="font-size:0.72rem">${cfg?.primary_colour||'#2D6A2D'}</span></div></div>
             <div><label class="form-label">Secondary</label><div style="display:flex;align-items:center;gap:6px"><div style="width:20px;height:20px;border-radius:4px;background:${cfg?.secondary_colour||'#1A1A1A'};border:1px solid var(--border)"></div><span class="mono" style="font-size:0.72rem">${cfg?.secondary_colour||'#1A1A1A'}</span></div></div>
@@ -1397,7 +1613,74 @@ function updateModalField(field, value) {
 
 function renderModal() {
   if (!state.modal) return '';
-  if (state.modal.mode === 'create_night') {
+  if (state.modal.mode === 'create_competition') {
+    const d = state.modal.data;
+    const compTypes = state.nightTypes.filter(nt => !nt.counts_match_points);
+    return `
+      <div class="modal-overlay" onclick="if(event.target===this)state.modal=null;render()">
+        <div class="modal" onclick="event.stopPropagation()">
+          <div style="padding:14px 16px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">CREATE COMPETITION</div>
+            <button class="btn btn-ghost" style="padding:2px 8px" onclick="state.modal=null;render()">✕</button>
+          </div>
+          <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+            <div>
+              <label class="form-label">Date *</label>
+              <input class="form-input" type="date" value="${d.date}" oninput="updateModalField('date',this.value)">
+            </div>
+            <div>
+              <label class="form-label">Competition Type *</label>
+              <select class="form-input form-select" onchange="updateModalField('night_type_id',this.value)">
+                ${compTypes.map(nt => `<option value="${nt.id}" ${d.night_type_id===nt.id?'selected':''}>${nt.name}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="form-label">Notes (optional)</label>
+              <input class="form-input" value="${d.notes||''}" oninput="updateModalField('notes',this.value)" placeholder="Any notes">
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+              <button class="btn btn-ghost" onclick="state.modal=null;render()">Cancel</button>
+              <button class="btn btn-primary" onclick="saveCompetition()">Create Competition</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+    if (state.modal.mode === 'add_gdf_event') {
+    const d = state.modal.data;
+    return `<div class="modal-overlay" onclick="if(event.target===this)state.modal=null;render()">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div style="padding:14px 16px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">ADD GDF EVENT</div>
+          <button class="btn btn-ghost" style="padding:2px 8px" onclick="state.modal=null;render()">✕</button>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+          <div>
+            <label class="form-label">Event Name *</label>
+            <input class="form-input" value="${d.name||''}" oninput="updateModalField('name',this.value)" placeholder="e.g. JHB Open 2026">
+          </div>
+          <div>
+            <label class="form-label">Date *</label>
+            <input class="form-input" type="date" value="${d.date}" oninput="updateModalField('date',this.value)">
+          </div>
+          <div>
+            <label class="form-label">Event Type</label>
+            <select class="form-input form-select" onchange="updateModalField('event_type',this.value)">
+              <option value="johannesburg" ${d.event_type==='johannesburg'?'selected':''}>Johannesburg</option>
+              <option value="gauteng" ${d.event_type==='gauteng'?'selected':''}>Gauteng</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn btn-ghost" onclick="state.modal=null;render()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveGdfEvent()">Add Event</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+    if (state.modal.mode === 'create_night') {
     const d = state.modal.data;
     return `
       <div class="modal-overlay" onclick="if(event.target===this)state.modal=null;render()">
