@@ -866,6 +866,40 @@ function renderHeader() {
 // RENDER — HOME PAGE
 // ═══════════════════════════════════════════════
 
+function renderLastNightResults(nightId) {
+  const nightBlocks = (state.blocks||[]).filter(b => b.night_id === nightId).sort((a,b) => a.block_label.localeCompare(b.block_label));
+  if (!nightBlocks.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No block data recorded.</div>';
+  const medal = ['🥇','🥈','🥉'];
+  return nightBlocks.map(block => {
+    const bps = (state.blockPlayers||[]).filter(bp => bp.block_id === block.id).sort((a,b) => a.slot_index - b.slot_index);
+    const playerStats = bps.map(bp => {
+      const player = state.players.find(p => p.id === bp.player_id);
+      const res = state.results.filter(r => r.block_id === block.id && (r.home_player_id === bp.player_id || r.away_player_id === bp.player_id));
+      let legs = 0, gw = 0;
+      res.forEach(r => {
+        const myL = r.home_player_id === bp.player_id ? r.home_legs : r.away_legs;
+        const opL = r.home_player_id === bp.player_id ? r.away_legs : r.home_legs;
+        if (r.home_legs === 0 && r.away_legs === 0) return;
+        legs += myL;
+        if (myL > opL) gw++;
+      });
+      return { name: player ? player.first_name + ' ' + player.last_name : '—', total: legs + gw * 2 + (block.bonus||0) };
+    }).sort((a,b) => b.total - a.total);
+
+    let html = '<div style="margin-bottom:10px">';
+    html += '<div style="font-size:0.68rem;font-weight:700;color:var(--green-accent);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">' + block.block_label + '</div>';
+    playerStats.forEach((p, i) => {
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;border-bottom:1px solid var(--border)">';
+      html += '<span style="font-size:0.72rem">' + (medal[i] || (i+1)+'.') + '</span>';
+      html += '<span style="font-size:0.75rem;font-weight:' + (i===0?'700':'500') + ';flex:1">' + p.name + '</span>';
+      html += '<span style="font-size:0.72rem;color:var(--red);font-weight:700">' + p.total + '</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+    return html;
+  }).join('');
+}
+
 function renderHomeCompetitions() {
   const compNights = getCompNights().filter(n => n.status === 'locked' || n.status === 'submitted');
   if (!compNights.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No competitions recorded yet.</div>';
@@ -937,9 +971,9 @@ function renderHome() {
                 <td class="rank">${ordinal(i+1)}</td>
                 <td style="font-weight:600">${p.first_name} ${p.last_name}</td>
                 ${showCategory ? `<td><span class="pill pill-${p.category.startsWith('junior')?'temp':'registered'}" style="font-size:0.6rem">${p.category==='junior_boy'?'Boy':'Girl'}</span></td>` : ''}
-                <td class="points" style="text-align:right">${p.totalPoints}</td>
-                <td style="text-align:right;color:var(--text-muted)" class="hide-mobile">${p.gamesPlayed}</td>
-                <td style="text-align:right;color:var(--text-muted)" class="hide-mobile">${p.gamesWon}</td>
+                <td class="points" style="text-align:right">${p.seasonPoints||0}</td>
+                <td style="text-align:right;color:var(--text-muted)" class="hide-mobile">${p.gamesPlayed||0}</td>
+                <td style="text-align:right;color:var(--text-muted)" class="hide-mobile">${p.gamesWon||0}</td>
               </tr>`).join('')}
           </tbody>
         </table>
@@ -950,33 +984,33 @@ function renderHome() {
     <div style="padding:10px;display:flex;flex-direction:column;gap:12px">
 
       <!-- 3-column layout: Standings | Accolades | Last Night -->
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;align-items:start" class="home-grid">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;height:calc(100vh - 220px)" class="home-grid">
 
       <!-- Season Standings -->
-      <div class="card" style="overflow:hidden">
+      <div class="card" style="overflow:hidden;height:100%;display:flex;flex-direction:column">
         <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">SEASON STANDINGS</div>
           ${state.seasons.find(s=>s.is_active) ? `<div style="font-size:0.68rem;color:var(--text-muted)">${state.seasons.find(s=>s.is_active)?.name || ''}</div>` : ''}
         </div>
-        <div style="padding:8px 10px">
+        <div style="padding:8px 10px;flex-shrink:0">
           <div class="tab-group" style="margin-bottom:10px">
             <div class="tab-btn ${state.activeStandingsTab==='men'?'active':''}" onclick="state.activeStandingsTab='men';render()">Men</div>
             <div class="tab-btn ${state.activeStandingsTab==='ladies'?'active':''}" onclick="state.activeStandingsTab='ladies';render()">Ladies</div>
             <div class="tab-btn ${state.activeStandingsTab==='juniors'?'active':''}" onclick="state.activeStandingsTab='juniors';render()">Juniors</div>
           </div>
-          ${state.activeStandingsTab==='men' ? standingTable(menStandings) : ''}
+          <div style="flex:1;overflow-y:auto">${state.activeStandingsTab==='men' ? standingTable(menStandings) : ''}
           ${state.activeStandingsTab==='ladies' ? standingTable(ladiesStandings) : ''}
           ${state.activeStandingsTab==='juniors' ? standingTable(juniorStandings, true) : ''}
         </div>
       </div>
 
       <!-- Legendary Accolades -->
-      <div class="card" style="overflow:hidden">
+      <div class="card" style="overflow:hidden;height:100%;display:flex;flex-direction:column">
         <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">LEGENDARY ACCOLADES</div>
           <div style="font-size:0.68rem;color:var(--text-muted)">180 · 171 · 170 Close · 9 Darter</div>
         </div>
-        <div style="padding:10px 12px">
+        <div style="padding:10px 12px;flex:1;overflow-y:auto">
           ${!legendary.length
             ? `<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No legendary accolades yet this season.</div>`
             : `<div style="display:flex;flex-direction:column;gap:6px">
@@ -993,15 +1027,15 @@ function renderHome() {
       </div>
 
       <!-- Last Night Block Results -->
-      <div class="card" style="overflow:hidden">
+      <div class="card" style="overflow:hidden;height:100%;display:flex;flex-direction:column">
         <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em;color:var(--text)">LAST NIGHT — BLOCK RESULTS</div>
           ${lastNight ? `<div style="font-size:0.68rem;color:var(--text-muted)">${formatDate(lastNight.date)}</div>` : ''}
         </div>
-        <div style="padding:10px 12px">
+        <div style="padding:8px 10px;flex:1;overflow-y:auto">
           ${!lastNight
-            ? `<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No nights submitted yet.</div>`
-            : `<div style="font-size:0.78rem;color:var(--text-muted);text-align:center;padding:12px">Block results coming soon — requires block/player data.</div>`}
+            ? '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No nights submitted yet.</div>'
+            : renderLastNightResults(lastNight.id)}
         </div>
       </div>
 
