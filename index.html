@@ -136,6 +136,7 @@ const state = {
   tab: 'home',
   lightMode: false,
   loading: false,
+  blocks: [],               // all blocks (for bonus lookup)
   activeNight: null,        // night being worked on
   activeBlockIdx: 0,        // which block tab is active
   nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
@@ -231,6 +232,7 @@ async function loadAllData() {
     state.spaceConfig = await runSingle(sb.from('space_config').select('*').eq('space_id', SPACE_ID).single());
     state.nights     = await run(sb.from('nights').select('*').eq('space_id', SPACE_ID).order('date', { ascending: false }));
     state.results    = await run(sb.from('results').select('*').eq('space_id', SPACE_ID));
+    state.blocks     = await run(sb.from('blocks').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
     console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
@@ -300,8 +302,7 @@ async function viewNight(nightId) {
         else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') { accoladesArr[idx].hc++; accoladesArr[idx].hc_value = a.value; }
         else if (a.accolade_type === '15_dart') { accoladesArr[idx].l15++; accoladesArr[idx].l15_value = String(a.value || 14); }
       });
-      const bonusPerSlot = Array(size).fill(block.bonus || 0); // spread block bonus to each slot for display
-      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonuses: bonusPerSlot, id: block.id };
+      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id };
     });
     state.activeNight = { ...night, viewOnly: true };
     state.activeBlockIdx = 0;
@@ -356,7 +357,7 @@ function addBlock() {
     slots: Array(size).fill(null),
     legs: Array.from({length: size}, () => Array(size).fill(0)),
     accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '' })),
-    bonuses: Array(size).fill(0)
+    bonus: 0
   });
   state.activeBlockIdx = state.nightBlocks.length - 1;
   render();
@@ -375,7 +376,7 @@ function setBlockSize(blockIdx, size) {
   b.slots = Array(size).fill(null).map((_, i) => b.slots[i] || null);
   b.legs = Array.from({length: size}, (_, r) => Array.from({length: size}, (_, c) => (b.legs[r] && b.legs[r][c]) || 0));
   b.accolades = Array.from({length: size}, (_, i) => b.accolades[i] || { '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '' });
-  b.bonuses = Array.from({length: size}, (_, i) => (b.bonuses && b.bonuses[i]) || 0);
+
   render();
 }
 
@@ -408,9 +409,8 @@ function updateAccolade(blockIdx, slotIdx, type, val) {
   }
 }
 
-function updateBonus(blockIdx, slotIdx, val) {
-  if (!state.nightBlocks[blockIdx].bonuses) state.nightBlocks[blockIdx].bonuses = [];
-  state.nightBlocks[blockIdx].bonuses[slotIdx] = Math.max(0, parseInt(val) || 0);
+function updateBonus(blockIdx, val) {
+  state.nightBlocks[blockIdx].bonus = Math.max(0, parseInt(val) || 0);
   render();
 }
 
@@ -428,8 +428,7 @@ function calcBlockStats(blockIdx) {
     }
     const gamesPlayed = b.slots.filter((s, i) => i !== r && s).length;
     const gwPoints = gamesWon * 2;
-    const slotBonus = (b.bonuses && b.bonuses[r]) || 0;
-    const totalPoints = legsWon + gwPoints + slotBonus;
+    const totalPoints = legsWon + gwPoints + (b.bonus || 0);
     return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints };
   });
 }
@@ -467,7 +466,7 @@ async function submitNight() {
         game_type_id: state.gameTypes[0]?.id || null,
         block_label: b.label,
         size: b.size,
-        bonus: (b.bonuses || []).reduce((s,v)=>s+(v||0),0),
+        bonus: b.bonus || 0,
         status: 'locked'
       }).select().single();
       if (blockErr) throw blockErr;
@@ -589,8 +588,18 @@ function calcPlayerSeasonStats(playerId) {
   });
   const player = state.players.find(p => p.id === playerId);
   const basePoints = player ? (player.base_selection_points || 0) : 0;
-  const totalPoints = legsWon + gwPoints + basePoints;
-  return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints, basePoints, accolades: playerAcc };
+  // Add block bonuses from all league nights
+  const playerBlockIds = new Set(
+    state.results
+      .filter(r => leagueNightIds.has(r.night_id) && (r.home_player_id === playerId || r.away_player_id === playerId))
+      .map(r => r.block_id)
+  );
+  const blockBonus = [...playerBlockIds].reduce((sum, blockId) => {
+    const block = (state.blocks || []).find(b => b.id === blockId);
+    return sum + (block ? (block.bonus || 0) : 0);
+  }, 0);
+  const totalPoints = legsWon + gwPoints + basePoints + blockBonus;
+  return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints, basePoints, blockBonus, accolades: playerAcc };
 }
 
 function getStandings(category) {
@@ -1080,7 +1089,9 @@ function renderBlockEntry() {
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">
-        <input type="number" min="0" value="${(b.bonuses&&b.bonuses[r])||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},${r},this.value)" ${!pid?'disabled':''}>
+        ${r===0
+          ? `<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">`
+          : `<span style="color:var(--text-muted)">${b.bonus||0}</span>`}
       </td>
       <td style="padding:4px 6px;text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
       <td style="padding:4px 6px;text-align:center">
