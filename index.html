@@ -2158,15 +2158,20 @@ function render() {
       <div style="font-size:0.78rem;color:var(--text-muted)">Loading...</div>
     </div>`;
   } else {
-    switch(state.tab) {
-      case 'home': pageContent = renderHome(); break;
-      case 'nightsetup': pageContent = renderNightSetup(); break;
-      case 'seasonlog': pageContent = renderSeasonLog(); break;
-      case 'players': pageContent = renderPlayers(); break;
-      case 'accolades': pageContent = renderAccoladeGuide(); break;
-      case 'competitions': pageContent = renderCompetitions(); break;
-      case 'config': pageContent = renderConfig(); break;
-      default: pageContent = renderHome();
+    try {
+      switch(state.tab) {
+        case 'home': pageContent = renderHome(); break;
+        case 'nightsetup': pageContent = renderNightSetup(); break;
+        case 'seasonlog': pageContent = renderSeasonLog(); break;
+        case 'players': pageContent = renderPlayers(); break;
+        case 'accolades': pageContent = renderAccoladeGuide(); break;
+        case 'competitions': pageContent = renderCompetitions(); break;
+        case 'config': pageContent = renderConfig(); break;
+        default: pageContent = renderHome();
+      }
+    } catch(e) {
+      console.error('Render error:', e);
+      pageContent = '<div style="padding:20px;background:#CC0000;color:white;border-radius:8px;margin:10px;font-family:monospace;font-size:13px"><strong>ERROR on ' + state.tab + ':</strong><br>' + e.message + '<br><br>' + (e.stack||'').split('\n').slice(0,4).join('<br>') + '</div>';
     }
   }
   root.innerHTML = renderHeader() + `<div style="max-width:1200px;margin:0 auto">${pageContent}</div>` + renderModal();
