@@ -238,6 +238,36 @@ async function loadAllData() {
   state.loading = false; render();
 }
 
+
+async function resubmitNight() {
+  if (!state.activeNight) return;
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  if (!confirm('This will replace all existing results for this night. Continue?')) return;
+
+  state.loading = true; render();
+  try {
+    const nightId = state.activeNight.id;
+
+    // Delete existing data for this night
+    await sb.from('accolades').delete().eq('night_id', nightId);
+    await sb.from('results').delete().eq('night_id', nightId);
+    await sb.from('block_players').delete().in('block_id',
+      (await sb.from('blocks').select('id').eq('night_id', nightId)).data.map(b => b.id)
+    );
+    await sb.from('blocks').delete().eq('night_id', nightId);
+
+    // Reset night to draft then reuse submitNight logic
+    await sb.from('nights').update({ status: 'draft' }).eq('id', nightId);
+
+    // Now submit fresh
+    await submitNight();
+  } catch(e) {
+    console.error('Resubmit error:', e);
+    showToast('Error resubmitting: ' + e.message, 'error');
+    state.loading = false; render();
+  }
+}
+
 async function refreshData() { await loadAllData(); showToast('Data refreshed'); }
 
 
@@ -1007,7 +1037,7 @@ function renderBlockEntry() {
         <input type="number" min="0" max="3" value="${val}"
           style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.78rem;font-family:'Share Tech Mono',monospace"
           onchange="updateLeg(${state.activeBlockIdx},${r},${c},this.value)"
-          ${!pid ? 'disabled' : ''}>
+          ${(!pid || night.viewOnly) ? 'disabled' : ''}>
       </td>`;
     }).join('');
 
@@ -1059,10 +1089,11 @@ function renderBlockEntry() {
           <button class="btn btn-primary" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];render()">← Back</button>
           ${night.viewOnly ? `
             <span style="font-size:0.7rem;color:var(--text-muted);padding:2px 8px;border:1px solid var(--border);border-radius:4px">View Only</span>
+            ${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight.viewOnly=false;render()">✏️ Edit</button>' : ''}
           ` : `
             <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
             <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
-            <button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>
+            ${night.id ? '<button class="btn btn-red" style="font-size:0.72rem" onclick="resubmitNight()">Re-Submit Night</button>' : '<button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>'}
           `}
         </div>
       </div>
