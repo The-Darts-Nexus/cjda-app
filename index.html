@@ -319,6 +319,84 @@ function getCompStandings(nightId) {
   });
 }
 
+function renderGdfCalendar() {
+  if (!state.gdfEvents || !state.gdfEvents.length) {
+    return '<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.78rem">No GDF events recorded yet. Admin can add events via the + Add Event button.</div>';
+  }
+  const players = state.players.filter(p => p.status === 'registered').sort((a,b) => a.last_name.localeCompare(b.last_name));
+  const events = state.gdfEvents;
+  const typeLabel = { johannesburg: 'JHB', gauteng: 'GPT', wednesday: 'WED' };
+
+  let headerCells = '';
+  events.forEach(e => {
+    headerCells += '<th style="padding:4px 8px;text-align:center;color:var(--text-muted);font-size:0.62rem;border-bottom:1px solid var(--border);white-space:nowrap;min-width:60px">'
+      + '<div style="font-weight:700;color:var(--green-accent)">' + (typeLabel[e.event_type]||'GDF') + '</div>'
+      + '<div>' + formatDate(e.date) + '</div>'
+      + '<div style="font-size:0.58rem;color:var(--text-muted)">' + e.name + '</div>'
+      + '</th>';
+  });
+
+  let rows = '';
+  players.forEach((p, i) => {
+    let cells = '';
+    let total = 0;
+    events.forEach(e => {
+      const attended = (state.gdfAttendance || []).some(a => a.event_id === e.id && a.player_id === p.id);
+      if (attended) total++;
+      if (isAdmin()) {
+        cells += '<td style="padding:4px;text-align:center;border-bottom:1px solid var(--border)">'
+          + '<input type="checkbox" ' + (attended?'checked':'') + ' onchange="toggleGdfAttendance(\'' + e.id + '\',\'' + p.id + '\',this.checked)" style="width:16px;height:16px;cursor:pointer">'
+          + '</td>';
+      } else {
+        cells += '<td style="padding:4px;text-align:center;border-bottom:1px solid var(--border);color:' + (attended?'var(--green-accent)':'var(--text-muted)') + '">'
+          + (attended?'✓':'—') + '</td>';
+      }
+    });
+    rows += '<tr style="' + (i%2===0?'':'background:rgba(45,106,45,0.05)') + '">'
+      + '<td style="padding:4px 8px;font-weight:600;font-size:0.75rem;white-space:nowrap;border-bottom:1px solid var(--border)">' + p.first_name + ' ' + p.last_name + '</td>'
+      + cells
+      + '<td style="padding:4px 8px;text-align:center;font-weight:700;color:var(--green-accent);border-bottom:1px solid var(--border)">' + total + '</td>'
+      + '</tr>';
+  });
+
+  return '<table style="width:100%;border-collapse:collapse;font-size:0.75rem">'
+    + '<thead><tr style="background:var(--green-dark)">'
+    + '<th style="padding:4px 8px;text-align:left;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Player</th>'
+    + headerCells
+    + '<th style="padding:4px 8px;text-align:center;color:var(--green-accent);font-size:0.65rem;border-bottom:1px solid var(--border)">Total</th>'
+    + '</tr></thead>'
+    + '<tbody>' + rows + '</tbody>'
+    + '</table>';
+}
+
+async function toggleGdfAttendance(eventId, playerId, attended) {
+  if (attended) {
+    const { error } = await sb.from('gdf_attendance').insert({ space_id: SPACE_ID, event_id: eventId, player_id: playerId });
+    if (error && !error.message.includes('duplicate')) { showToast(error.message,'error'); return; }
+  } else {
+    await sb.from('gdf_attendance').delete().eq('event_id', eventId).eq('player_id', playerId);
+  }
+  const { data } = await sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID);
+  state.gdfAttendance = data || [];
+  render();
+}
+
+function openAddGdfEvent() {
+  const today = new Date().toISOString().split('T')[0];
+  state.modal = { mode: 'add_gdf_event', data: { name:'', date: today, event_type:'johannesburg' } };
+  render();
+}
+
+async function saveGdfEvent() {
+  const d = state.modal.data;
+  if (!d.name || !d.date) { showToast('Name and date required','error'); return; }
+  const { error } = await sb.from('gdf_events').insert({ space_id: SPACE_ID, name: d.name, date: d.date, event_type: d.event_type });
+  if (error) { showToast(error.message,'error'); return; }
+  showToast('GDF Event added');
+  state.modal = null;
+  await loadAllData();
+}
+
 async function refreshData() { await loadAllData(); showToast('Data refreshed'); }
 
 
