@@ -270,7 +270,8 @@ async function viewNight(nightId) {
         else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') { accoladesArr[idx].hc++; accoladesArr[idx].hc_value = a.value; }
         else if (a.accolade_type === '15_dart') accoladesArr[idx].l15++;
       });
-      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id };
+      const bonusPerSlot = Array(size).fill(block.bonus || 0); // spread block bonus to each slot for display
+      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonuses: bonusPerSlot, id: block.id };
     });
     state.activeNight = { ...night, viewOnly: true };
     state.activeBlockIdx = 0;
@@ -325,7 +326,7 @@ function addBlock() {
     slots: Array(size).fill(null),
     legs: Array.from({length: size}, () => Array(size).fill(0)),
     accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 })),
-    bonus: 0
+    bonuses: Array(size).fill(0)
   });
   state.activeBlockIdx = state.nightBlocks.length - 1;
   render();
@@ -344,6 +345,7 @@ function setBlockSize(blockIdx, size) {
   b.slots = Array(size).fill(null).map((_, i) => b.slots[i] || null);
   b.legs = Array.from({length: size}, (_, r) => Array.from({length: size}, (_, c) => (b.legs[r] && b.legs[r][c]) || 0));
   b.accolades = Array.from({length: size}, (_, i) => b.accolades[i] || { '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 });
+  b.bonuses = Array.from({length: size}, (_, i) => (b.bonuses && b.bonuses[i]) || 0);
   render();
 }
 
@@ -366,8 +368,9 @@ function updateAccolade(blockIdx, slotIdx, type, val) {
   }
 }
 
-function updateBonus(blockIdx, val) {
-  state.nightBlocks[blockIdx].bonus = Math.max(0, parseInt(val) || 0);
+function updateBonus(blockIdx, slotIdx, val) {
+  if (!state.nightBlocks[blockIdx].bonuses) state.nightBlocks[blockIdx].bonuses = [];
+  state.nightBlocks[blockIdx].bonuses[slotIdx] = Math.max(0, parseInt(val) || 0);
   render();
 }
 
@@ -385,7 +388,8 @@ function calcBlockStats(blockIdx) {
     }
     const gamesPlayed = b.slots.filter((s, i) => i !== r && s).length;
     const gwPoints = gamesWon * 2;
-    const totalPoints = legsWon + gwPoints + (b.bonus || 0);
+    const slotBonus = (b.bonuses && b.bonuses[r]) || 0;
+    const totalPoints = legsWon + gwPoints + slotBonus;
     return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints };
   });
 }
@@ -423,7 +427,7 @@ async function submitNight() {
         game_type_id: state.gameTypes[0]?.id || null,
         block_label: b.label,
         size: b.size,
-        bonus: b.bonus || 0,
+        bonus: (b.bonuses || []).reduce((s,v)=>s+(v||0),0),
         status: 'locked'
       }).select().single();
       if (blockErr) throw blockErr;
@@ -1021,7 +1025,9 @@ function renderBlockEntry() {
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesWon : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${r===0?`<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">`:(b.bonus||0)}</td>
+      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">
+        <input type="number" min="0" value="${(b.bonuses&&b.bonuses[r])||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},${r},this.value)" ${!pid?'disabled':''}>
+      </td>
       <td style="padding:4px 6px;text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
       <td style="padding:4px 6px;text-align:center">
         <input type="number" min="0" value="${acc['180']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'180',this.value)" ${!pid?'disabled':''}>
@@ -1049,12 +1055,15 @@ function renderBlockEntry() {
           <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">${nightTypeName} — ${formatDate(night.date)}</div>
           <div style="font-size:0.68rem;color:var(--text-muted)">Enter legs won per match. Calculations update automatically.</div>
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];render()">← Back</button>
-          ${night.viewOnly ? '<span style="font-size:0.7rem;color:var(--text-muted);padding:4px 8px">View Only</span>' : ''}
-          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
-          <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
-          ${!night.viewOnly ? '<button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>' : ''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-primary" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];render()">← Back</button>
+          ${night.viewOnly ? `
+            <span style="font-size:0.7rem;color:var(--text-muted);padding:2px 8px;border:1px solid var(--border);border-radius:4px">View Only</span>
+          ` : `
+            <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
+            <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
+            <button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>
+          `}
         </div>
       </div>
 
