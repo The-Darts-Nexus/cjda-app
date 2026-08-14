@@ -32,7 +32,7 @@
     --border: rgba(45,106,45,0.2);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html { font-size: 13px; }
+  html { font-size: 15px; }
   body { font-family: 'Rajdhani', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; transition: background 0.3s, color 0.3s; }
   h1, h2, h3, .font-display { font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.05em; }
   .mono { font-family: 'Share Tech Mono', monospace; }
@@ -298,7 +298,7 @@ async function viewNight(nightId) {
         if (a.accolade_type === '180') accoladesArr[idx]['180']++;
         else if (a.accolade_type === '171') accoladesArr[idx]['171']++;
         else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') { accoladesArr[idx].hc++; accoladesArr[idx].hc_value = a.value; }
-        else if (a.accolade_type === '15_dart') accoladesArr[idx].l15++;
+        else if (a.accolade_type === '15_dart') { accoladesArr[idx].l15++; accoladesArr[idx].l15_value = String(a.value || 14); }
       });
       const bonusPerSlot = Array(size).fill(block.bonus || 0); // spread block bonus to each slot for display
       return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonuses: bonusPerSlot, id: block.id };
@@ -355,7 +355,7 @@ function addBlock() {
     size,
     slots: Array(size).fill(null),
     legs: Array.from({length: size}, () => Array(size).fill(0)),
-    accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 })),
+    accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '' })),
     bonuses: Array(size).fill(0)
   });
   state.activeBlockIdx = state.nightBlocks.length - 1;
@@ -374,7 +374,7 @@ function setBlockSize(blockIdx, size) {
   b.size = size;
   b.slots = Array(size).fill(null).map((_, i) => b.slots[i] || null);
   b.legs = Array.from({length: size}, (_, r) => Array.from({length: size}, (_, c) => (b.legs[r] && b.legs[r][c]) || 0));
-  b.accolades = Array.from({length: size}, (_, i) => b.accolades[i] || { '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 });
+  b.accolades = Array.from({length: size}, (_, i) => b.accolades[i] || { '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '' });
   b.bonuses = Array.from({length: size}, (_, i) => (b.bonuses && b.bonuses[i]) || 0);
   render();
 }
@@ -384,6 +384,16 @@ function setBlockSlot(blockIdx, slotIdx, playerId) {
   render();
 }
 
+
+function legColor(val) {
+  const v = parseInt(val) || 0;
+  if (v === 0) return 'rgba(204,0,0,0.25)';
+  if (v === 1) return 'rgba(255,140,0,0.3)';
+  if (v === 2) return 'rgba(45,106,45,0.4)';
+  if (v === 3) return 'rgba(138,43,226,0.3)';
+  return 'transparent';
+}
+
 function updateLeg(blockIdx, row, col, val) {
   const v = Math.max(0, Math.min(3, parseInt(val) || 0));
   state.nightBlocks[blockIdx].legs[row][col] = v;
@@ -391,8 +401,8 @@ function updateLeg(blockIdx, row, col, val) {
 }
 
 function updateAccolade(blockIdx, slotIdx, type, val) {
-  if (type === 'hc_value') {
-    state.nightBlocks[blockIdx].accolades[slotIdx].hc_value = val;
+  if (type === 'hc_value' || type === 'l15_value') {
+    state.nightBlocks[blockIdx].accolades[slotIdx][type] = val;
   } else {
     state.nightBlocks[blockIdx].accolades[slotIdx][type] = Math.max(0, parseInt(val) || 0);
   }
@@ -505,7 +515,7 @@ async function submitNight() {
           const accType = hcVal === 170 ? '170_close' : 'high_close';
           for (let i = 0; i < acc.hc; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: accType, value: hcVal });
         }
-        if (acc.l15 > 0) for (let i = 0; i < acc.l15; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '15_dart', value: 1 });
+        if (acc.l15 > 0) { const l15Val = parseInt(acc.l15_value) || 14; for (let i = 0; i < acc.l15; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '15_dart', value: l15Val }); }
       });
       if (accInserts.length) {
         const { error: accErr } = await sb.from('accolades').insert(accInserts);
@@ -1033,9 +1043,10 @@ function renderBlockEntry() {
     const legCells = Array.from({length: N}, (_, c) => {
       if (c === r) return `<td style="background:#1A1A1A;width:32px"></td>`;
       const val = b.legs[r][c] || 0;
-      return `<td style="padding:2px;text-align:center">
+      const lc = legColor(val);
+      return `<td style="padding:1px;text-align:center;background:${lc};transition:background 0.15s">
         <input type="number" min="0" max="3" value="${val}"
-          style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.78rem;font-family:'Share Tech Mono',monospace"
+          style="width:34px;background:transparent;border:none;color:var(--text);text-align:center;padding:3px 2px;font-size:0.9rem;font-family:'Share Tech Mono',monospace;font-weight:700"
           onchange="updateLeg(${state.activeBlockIdx},${r},${c},this.value)"
           ${(!pid || night.viewOnly) ? 'disabled' : ''}>
       </td>`;
@@ -1070,7 +1081,10 @@ function renderBlockEntry() {
         <input type="number" min="90" max="170" value="${acc.hc_value||''}" placeholder="val" style="width:38px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc_value',this.value)" ${!pid?'disabled':''}>
       </td>
       <td style="padding:4px 6px;text-align:center">
-        <input type="number" min="0" value="${acc.l15||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15',this.value)" ${!pid?'disabled':''}>
+        <div style="display:flex;gap:2px;align-items:center;justify-content:center">
+          <input type="number" min="0" value="${acc.l15||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15',this.value)" ${!pid?'disabled':''}>
+          <input type="number" min="9" max="14" value="${acc.l15_value||''}" placeholder="darts" style="width:44px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15_value',this.value)" ${!pid?'disabled':''}>
+        </div>
       </td>
       <td style="padding:4px 6px;text-align:center;font-weight:700;color:var(--green-accent);font-size:0.82rem">${positions[r] || ''}</td>
     </tr>`;
