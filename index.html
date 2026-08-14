@@ -137,6 +137,7 @@ const state = {
   lightMode: false,
   loading: false,
   blocks: [],               // all blocks (for bonus lookup)
+  blockPlayers: [],          // all block_players (for attendance lookup)
   activeNight: null,        // night being worked on
   activeBlockIdx: 0,        // which block tab is active
   nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
@@ -232,7 +233,8 @@ async function loadAllData() {
     state.spaceConfig = await runSingle(sb.from('space_config').select('*').eq('space_id', SPACE_ID).single());
     state.nights     = await run(sb.from('nights').select('*').eq('space_id', SPACE_ID).order('date', { ascending: false }));
     state.results    = await run(sb.from('results').select('*').eq('space_id', SPACE_ID));
-    state.blocks     = await run(sb.from('blocks').select('*').eq('space_id', SPACE_ID));
+    state.blocks       = await run(sb.from('blocks').select('*').eq('space_id', SPACE_ID));
+    state.blockPlayers = await run(sb.from('block_players').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
     console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
@@ -546,68 +548,140 @@ function getActiveSeasonId() {
 }
 
 function calcPlayerSeasonStats(playerId) {
-  const seasonId = getActiveSeasonId();
-  // Get nights that count match points for this season
-  const season = state.seasons.find(s => s.id === seasonId);
-  const seasonStart = season ? season.start_date : null;
+  const season = state.seasons.find(s => s.is_active);
+  if (!season) return { seasonPoints:0, selectionPoints:0, attendancePoints:0, thisWeek:0, legsWon:0, gamesWon:0, gamesPlayed:0, gwPoints:0, blockBonus:0, totalPoints:0, acc180ytd:0, acc171ytd:0, acc170ytd:0, accHCytd:0, accHCcareer:0, highestClose:0, acc15ytd:0, accolades:[] };
 
-  const leagueNightIds = new Set(
-    state.nights
-      .filter(n => {
-        if (n.season_id !== seasonId) return false;
-        if (seasonStart && n.date < seasonStart) return false;
-        const nt = state.nightTypes.find(t => t.id === n.night_type_id);
-        return nt ? nt.counts_match_points : false;
-      })
-      .map(n => n.id)
+  const spStart = season.season_points_start || '2025-11-12';
+  const spEnd = season.season_points_end || '2026-11-12';
+  const selStart = season.selection_points_start || '2026-06-01';
+  const selEnd = season.selection_points_end || '2027-05-01';
+
+  const inRange = (date, start, end) => date >= start && date <= end;
+
+  // All nights the player appeared in a block
+  const playerBlockIds = new Set(
+    (state.blockPlayers || []).filter(bp => bp.player_id === playerId).map(bp => bp.block_id)
   );
-  // Results from league nights only
-  const playerResults = state.results.filter(r =>
-    r.season_id === seasonId && leagueNightIds.has(r.night_id) &&
-    (r.home_player_id === playerId || r.away_player_id === playerId)
+  const playerNightIds = new Set(
+    (state.blocks || []).filter(b => playerBlockIds.has(b.id)).map(b => b.night_id)
   );
-  let legsWon = 0, gamesWon = 0, gamesPlayed = 0, gwPoints = 0;
-  playerResults.forEach(r => {
-    const isHome = r.home_player_id === playerId;
-    const myLegs = isHome ? r.home_legs : r.away_legs;
-    const oppLegs = isHome ? r.away_legs : r.home_legs;
-    const isWalkout = r.home_legs === 0 && r.away_legs === 0;
-    if (isWalkout) return;
-    legsWon += myLegs;
-    gamesPlayed++;
-    if (myLegs > oppLegs) { gamesWon++; gwPoints += 2; }
-  });
-  // Accolades from ALL nights in season (league + competition)
+
+  // Season points nights (counts_match_points + in season range)
+  const spNights = new Set(
+    state.nights.filter(n => {
+      if (!playerNightIds.has(n.id)) return false;
+      const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+      if (!nt || !nt.counts_match_points) return false;
+      return inRange(n.date, spStart, spEnd);
+    }).map(n => n.id)
+  );
+
+  // Selection points nights
+  const selNights = new Set(
+    state.nights.filter(n => {
+      if (!playerNightIds.has(n.id)) return false;
+      const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+      if (!nt || !nt.counts_match_points) return false;
+      return inRange(n.date, selStart, selEnd);
+    }).map(n => n.id)
+  );
+
+  // Attendance points nights
+  const attNights = new Set(
+    state.nights.filter(n => {
+      if (!playerNightIds.has(n.id)) return false;
+      const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+      if (!nt || !nt.contributes_attendance) return false;
+      return inRange(n.date, spStart, spEnd);
+    }).map(n => n.id)
+  );
+
+  const calcPoints = (nightSet) => {
+    let legs = 0, gw = 0, gp = 0;
+    state.results.filter(r => nightSet.has(r.night_id) && (r.home_player_id === playerId || r.away_player_id === playerId)).forEach(r => {
+      const isHome = r.home_player_id === playerId;
+      const myLegs = isHome ? r.home_legs : r.away_legs;
+      const oppLegs = isHome ? r.away_legs : r.home_legs;
+      const isWalkout = r.home_legs === 0 && r.away_legs === 0;
+      if (isWalkout) return;
+      legs += myLegs; gp++;
+      if (myLegs > oppLegs) gw++;
+    });
+    // Block bonuses
+    const blockBonus = [...new Set(
+      state.results.filter(r => nightSet.has(r.night_id) && (r.home_player_id === playerId || r.away_player_id === playerId)).map(r => r.block_id)
+    )].reduce((sum, bid) => {
+      const b = (state.blocks || []).find(b => b.id === bid);
+      return sum + (b ? (b.bonus || 0) : 0);
+    }, 0);
+    return { legs, gw, gp, gwPts: gw * 2, bonus: blockBonus, total: legs + gw * 2 + blockBonus };
+  };
+
+  const sp = calcPoints(spNights);
+  const sel = calcPoints(selNights);
+
+  // This week — most recent night in season range
+  const sortedNights = state.nights
+    .filter(n => playerNightIds.has(n.id) && spNights.has(n.id))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  let thisWeek = 0;
+  if (sortedNights.length) {
+    const lastNightId = sortedNights[0].id;
+    const twNightSet = new Set([lastNightId]);
+    const tw = calcPoints(twNightSet);
+    thisWeek = tw.total;
+  }
+
+  // Accolades — YTD (season points range)
   const playerAcc = state.accolades.filter(a => {
-    if (a.player_id !== playerId || a.season_id !== seasonId) return false;
-    if (seasonStart) {
-      const night = state.nights.find(n => n.id === a.night_id);
-      if (night && night.date < seasonStart) return false;
-    }
-    return true;
+    if (a.player_id !== playerId) return false;
+    const night = state.nights.find(n => n.id === a.night_id);
+    if (!night) return false;
+    return inRange(night.date, spStart, spEnd);
   });
+
+  const acc180ytd = playerAcc.filter(a => a.accolade_type === '180').length;
+  const acc171ytd = playerAcc.filter(a => a.accolade_type === '171').length;
+  const acc170ytd = playerAcc.filter(a => a.accolade_type === '170_close').length;
+  const hcAcc = playerAcc.filter(a => a.accolade_type === 'high_close' || a.accolade_type === '170_close');
+  const accHCytd = hcAcc.length;
+  const highestClose = hcAcc.reduce((max, a) => Math.max(max, a.value || 0), 0);
+  const acc15ytd = playerAcc.filter(a => a.accolade_type === '15_dart').length;
+
   const player = state.players.find(p => p.id === playerId);
   const basePoints = player ? (player.base_selection_points || 0) : 0;
-  // Add block bonuses from all league nights
-  const playerBlockIds = new Set(
-    state.results
-      .filter(r => leagueNightIds.has(r.night_id) && (r.home_player_id === playerId || r.away_player_id === playerId))
-      .map(r => r.block_id)
-  );
-  const blockBonus = [...playerBlockIds].reduce((sum, blockId) => {
-    const block = (state.blocks || []).find(b => b.id === blockId);
-    return sum + (block ? (block.bonus || 0) : 0);
-  }, 0);
-  const totalPoints = legsWon + gwPoints + basePoints + blockBonus;
-  return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints, basePoints, blockBonus, accolades: playerAcc };
+  const acc180career = (player ? (player.base_career_180s || 0) : 0) + acc180ytd;
+  const acc171career = (player ? (player.base_career_171s || 0) : 0) + acc171ytd;
+  const acc170career = (player ? (player.base_career_170s || 0) : 0) + acc170ytd;
+  const accHCcareer = (player ? (player.base_career_hc_count || 0) : 0) + accHCytd;
+  const highestCloseCareer = Math.max(player ? (player.highest_close || 0) : 0, highestClose);
+
+  return {
+    seasonPoints: sp.total + basePoints,
+    selectionPoints: sel.total,
+    attendancePoints: attNights.size,
+    thisWeek,
+    legsWon: sp.legs,
+    gamesWon: sp.gw,
+    gamesPlayed: sp.gp,
+    gwPoints: sp.gwPts,
+    blockBonus: sp.bonus,
+    acc180ytd, acc180career,
+    acc171ytd, acc171career,
+    acc170ytd, acc170career,
+    accHCytd, accHCcareer,
+    highestClose: highestCloseCareer,
+    acc15ytd,
+    accolades: playerAcc
+  };
 }
 
 function getStandings(category) {
   return state.players
     .filter(p => p.category === category)
     .map(p => ({ ...p, ...calcPlayerSeasonStats(p.id) }))
-    .filter(p => p.gamesPlayed > 0 || p.accolades.length > 0 || (p.base_selection_points || 0) > 0)
-    .sort((a, b) => b.totalPoints - a.totalPoints || a.last_name.localeCompare(b.last_name));
+    .filter(p => p.seasonPoints > 0 || p.selectionPoints > 0 || p.attendancePoints > 0 || p.accolades.length > 0 || (p.base_selection_points || 0) > 0)
+    .sort((a, b) => b.seasonPoints - a.seasonPoints || a.last_name.localeCompare(b.last_name));
 }
 
 function getLegendaryAccolades() {
@@ -843,65 +917,114 @@ function renderHome() {
 // RENDER — SEASON LOG
 // ═══════════════════════════════════════════════
 function renderSeasonLog() {
+  const season = state.seasons.find(s => s.is_active);
+  const spStart = season ? (season.season_points_start || '2025-11-12') : '2025-11-12';
+  const spEnd = season ? (season.season_points_end || '2026-11-12') : '2026-11-12';
+  const selStart = season ? (season.selection_points_start || '2026-06-01') : '2026-06-01';
+  const selEnd = season ? (season.selection_points_end || '2027-05-01') : '2027-05-01';
+
+  const fmtDate = (d) => {
+    if (!d) return '—';
+    const parts = d.split('-');
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  };
+
   const categories = [
-    { id: 'men', label: 'Men', standings: getStandings('men') },
-    { id: 'ladies', label: 'Ladies', standings: getStandings('ladies') },
-    { id: 'juniors', label: 'Juniors', standings: [...getStandings('junior_boy'), ...getStandings('junior_girl')].sort((a,b) => b.totalPoints - a.totalPoints) },
+    { id: 'men', label: 'Men' },
+    { id: 'ladies', label: 'Ladies' },
+    { id: 'juniors', label: 'Juniors' },
   ];
-  const active = categories.find(c => c.id === (state.activeStandingsTab || 'men')) || categories[0];
+  const activeTab = state.activeStandingsTab || 'men';
+
+  // Get players for active tab
+  let players;
+  if (activeTab === 'juniors') {
+    const jb = getStandings('junior_boy');
+    const jg = getStandings('junior_girl');
+    players = [...jb, ...jg].sort((a,b) => b.seasonPoints - a.seasonPoints);
+  } else {
+    players = getStandings(activeTab);
+  }
+
+  const thStyle = `padding:4px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;letter-spacing:0.06em;text-transform:uppercase;border-bottom:1px solid var(--border);white-space:nowrap`;
+  const tdStyle = (center=true) => `padding:4px 6px;text-align:${center?'center':'left'};font-size:0.75rem;border-bottom:1px solid var(--border)`;
+
+  const rows = players.map((p, i) => `
+    <tr style="${i%2===0?'':'background:rgba(45,106,45,0.05)'}">
+      <td style="${tdStyle()}font-weight:700;color:var(--green-accent)">${i+1}</td>
+      <td style="${tdStyle()} font-family:'Share Tech Mono',monospace;font-size:0.68rem;color:var(--text-muted)">${p.dsa_number||'—'}</td>
+      <td style="${tdStyle(false)}font-weight:600;white-space:nowrap">${p.first_name} ${p.last_name}</td>
+      <td style="${tdStyle()}font-weight:700;color:var(--red)">${p.seasonPoints||0}</td>
+      <td style="${tdStyle()}color:var(--green-accent);font-weight:600">${p.thisWeek||0}</td>
+      <td style="${tdStyle()}">${p.attendancePoints||0}</td>
+      <td style="${tdStyle()}color:var(--text-muted)">${p.selectionPoints||0}</td>
+      <td style="${tdStyle()}color:${p.acc180ytd?'var(--red)':'var(--text-muted)'}">${p.acc180career||0} / ${p.acc180ytd||0}</td>
+      <td style="${tdStyle()}color:${p.acc171ytd?'var(--green-accent)':'var(--text-muted)'}">${p.acc171career||0} / ${p.acc171ytd||0}</td>
+      <td style="${tdStyle()}color:${p.acc170ytd?'#FFA500':'var(--text-muted)'}">${p.acc170career||0} / ${p.acc170ytd||0}</td>
+      <td style="${tdStyle()}">${p.accHCcareer||0} / ${p.accHCytd||0}</td>
+      <td style="${tdStyle()}font-weight:${p.highestClose?'700':'400'};color:${p.highestClose?'var(--green-accent)':'var(--text-muted)'}">${p.highestClose||'—'}</td>
+      <td style="${tdStyle()}">${p.acc15ytd||0}</td>
+    </tr>`).join('');
 
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
-      <div class="card" style="overflow:hidden">
-        <div style="padding:10px 12px 8px;background:var(--green-dark);border-bottom:1px solid var(--border)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.12em">SEASON LOG — ACCUMULATED POINTS</div>
-          <div style="font-size:0.68rem;color:var(--text-muted)">Registered players only. League nights only for points.</div>
+
+      <!-- Date range banner -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <div class="card2" style="padding:8px 14px;flex:1;min-width:200px">
+          <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Season Points Range</div>
+          <div style="font-family:'Share Tech Mono',monospace;font-size:0.82rem;color:var(--green-accent);font-weight:700">${fmtDate(spStart)} → ${fmtDate(spEnd)}</div>
+          <div style="font-size:0.68rem;color:var(--text-muted);margin-top:1px">Year-end prize giving</div>
         </div>
-        <div style="padding:8px 10px">
-          <div class="tab-group" style="margin-bottom:10px">
-            ${categories.map(c => `<div class="tab-btn ${state.activeStandingsTab===c.id?'active':''}" onclick="state.activeStandingsTab='${c.id}';render()">${c.label}</div>`).join('')}
+        <div class="card2" style="padding:8px 14px;flex:1;min-width:200px">
+          <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Selection Points Range</div>
+          <div style="font-family:'Share Tech Mono',monospace;font-size:0.82rem;color:var(--red);font-weight:700">${fmtDate(selStart)} → ${fmtDate(selEnd)}</div>
+          <div style="font-size:0.68rem;color:var(--text-muted);margin-top:1px">National team selection</div>
+        </div>
+      </div>
+
+      <!-- Season Log table -->
+      <div class="card" style="overflow:hidden">
+        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">SEASON LOG — ACCUMULATED POINTS</div>
+          <div style="font-size:0.68rem;color:var(--text-muted)">Registered players only. Career = all time. YTD = this season.</div>
+        </div>
+        <div style="padding:6px 8px">
+          <div class="tab-group" style="margin-bottom:8px">
+            ${categories.map(c => `<div class="tab-btn ${activeTab===c.id?'active':''}" onclick="state.activeStandingsTab='${c.id}';render()">${c.label}</div>`).join('')}
           </div>
-          <div style="overflow-x:auto">
-            <table class="data-table">
-              <thead><tr>
-                <th>#</th>
-                <th>Player</th>
-                <th style="text-align:right">Total</th>
-                <th style="text-align:right">GP</th>
-                <th style="text-align:right">GW</th>
-                <th style="text-align:right">Legs</th>
-                <th style="text-align:right">GW Pts</th>
-                <th style="text-align:right">180</th>
-                <th style="text-align:right">171</th>
-              </tr></thead>
-              <tbody>
-                ${!active.standings.length
-                  ? `<tr><td colspan="9" style="text-align:center;padding:16px;color:var(--text-muted)">No results yet this season.</td></tr>`
-                  : active.standings.map((p, i) => {
-                    const acc180 = p.accolades.filter(a => a.accolade_type === '180').length;
-                    const acc171 = p.accolades.filter(a => a.accolade_type === '171').length;
-                    return `<tr>
-                      <td class="rank">${ordinal(i+1)}</td>
-                      <td style="font-weight:600">${p.first_name} ${p.last_name}</td>
-                      <td class="points" style="text-align:right">${p.totalPoints}</td>
-                      <td style="text-align:right;color:var(--text-muted)">${p.gamesPlayed}</td>
-                      <td style="text-align:right;color:var(--text-muted)">${p.gamesWon}</td>
-                      <td style="text-align:right;color:var(--text-muted)">${p.legsWon}</td>
-                      <td style="text-align:right;color:var(--text-muted)">${p.gwPoints}</td>
-                      <td style="text-align:right;color:${acc180?'var(--red)':'var(--text-muted)'}">${acc180||'—'}</td>
-                      <td style="text-align:right;color:${acc171?'var(--green-accent)':'var(--text-muted)'}">${acc171||'—'}</td>
-                    </tr>`;}).join('')}
-              </tbody>
-            </table>
-          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+            <thead>
+              <tr style="background:var(--green-dark)">
+                <th style="${thStyle}">#</th>
+                <th style="${thStyle}">DSA</th>
+                <th style="${thStyle};text-align:left">Player</th>
+                <th style="${thStyle};color:var(--red)">Season<br>Pts</th>
+                <th style="${thStyle};color:var(--green-accent)">This<br>Week</th>
+                <th style="${thStyle}">Att<br>Pts</th>
+                <th style="${thStyle}">Select<br>Pts</th>
+                <th style="${thStyle};background:rgba(204,0,0,0.1)">180<br>Car/YTD</th>
+                <th style="${thStyle};background:rgba(45,106,45,0.15)">171<br>Car/YTD</th>
+                <th style="${thStyle};background:rgba(255,165,0,0.1)">170<br>Car/YTD</th>
+                <th style="${thStyle}">HC<br>Car/YTD</th>
+                <th style="${thStyle}">Best<br>Close</th>
+                <th style="${thStyle}">15&lt;</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${!players.length
+                ? `<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--text-muted)">No results yet for this period.</td></tr>`
+                : rows}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>`;
 }
 
-// ═══════════════════════════════════════════════
-// RENDER — PLAYERS
-// ═══════════════════════════════════════════════
+
 function renderPlayers() {
   const cats = ['men','ladies','junior_boy','junior_girl'];
   const catLabel = { men:'Men', ladies:'Ladies', junior_boy:'Junior (Boy)', junior_girl:'Junior (Girl)' };
