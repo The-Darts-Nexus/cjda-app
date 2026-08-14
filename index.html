@@ -1694,7 +1694,7 @@ function renderCompetitions() {
                 <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
                 <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}</td>
                 <td><span class="pill" style="background:rgba(204,0,0,0.2);color:#FF6666;border:1px solid rgba(204,0,0,0.3)">Draft</span></td>
-                ${isAdmin()?`<td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="state.competitionNightId='${n.id}';state.activeNight=null;state.nightBlocks=[];openNightEntry('${n.id}');state.tab='competitions';render()">Enter →</button></td>`:''}
+                ${isAdmin()?`<td><div style="display:flex;gap:4px"><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="state.competitionNightId='${n.id}';state.activeNight=null;state.nightBlocks=[];openNightEntry('${n.id}');state.tab='competitions';render()">Enter →</button><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteCompetition('${n.id}')">🗑</button></div></td>`:''}
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1715,7 +1715,7 @@ function renderCompetitions() {
                   <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
                   <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}</td>
                   <td style="font-size:0.78rem;font-weight:600;color:var(--green-accent)">🏆 ${winner}</td>
-                  <td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewCompetition('${n.id}')">View →</button></td>
+                  <td><div style="display:flex;gap:4px"><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewCompetition('${n.id}')">View →</button>${isAdmin()?`<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteCompetition('${n.id}')">🗑</button>`:''}</div></td>
                 </tr>`;
               }).join('')}
             </tbody>
@@ -1737,6 +1737,26 @@ function openCreateCompetition() {
   const compTypes = state.nightTypes.filter(nt => !nt.counts_match_points);
   state.modal = { mode: 'create_competition', data: { date: today, night_type_id: compTypes[0]?.id || '' } };
   render();
+}
+
+async function deleteCompetition(nightId) {
+  if (!isAdmin()) return;
+  if (!confirm('Delete this competition and all its results? This cannot be undone.')) return;
+  try {
+    // Delete accolades, results, block_players, blocks, then night
+    await sb.from('accolades').delete().eq('night_id', nightId);
+    await sb.from('results').delete().eq('night_id', nightId);
+    const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
+    if (blocks && blocks.length) {
+      await sb.from('block_players').delete().in('block_id', blocks.map(b => b.id));
+    }
+    await sb.from('blocks').delete().eq('night_id', nightId);
+    await sb.from('nights').delete().eq('id', nightId);
+    showToast('Competition deleted');
+    await loadAllData();
+  } catch(e) {
+    showToast('Error deleting: ' + e.message, 'error');
+  }
 }
 
 async function saveCompetition() {
