@@ -510,13 +510,16 @@ function openNightEntry(nightId) {
 
 function addBlock() {
   const size = 4;
+  const fmt = state.activeNight ? getNightFormat(state.activeNight.night_type_id) : 'singles';
+  const pps = getPlayersPerSlot(fmt);
   state.nightBlocks.push({
     label: `Block ${state.nightBlocks.length + 1}`,
     size,
-    slots: Array(size).fill(null),
+    format: fmt,
+    slots: Array(size).fill(null).map(() => Array(pps).fill(null)),
     legs: Array.from({length: size}, () => Array(size).fill(0)),
-    accolades: Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '' })),
-    bonus: 0
+    accolades: Array.from({length: size}, () => ({ records: [] })),
+    bonuses: Array(size).fill(0)
   });
   state.activeBlockIdx = state.nightBlocks.length - 1;
   render();
@@ -622,7 +625,8 @@ function calcBlockStats(blockIdx) {
     const slotHasPlayer = (slot) => Array.isArray(slot) ? slot.some(p=>p) : !!slot;
     const gamesPlayed = b.slots.filter((s, i) => i !== r && slotHasPlayer(s)).length;
     const gwPoints = gamesWon * 2;
-    const totalPoints = legsWon + gwPoints + (b.bonus || 0);
+    const blockBonus = b.bonus || 0;
+    const totalPoints = legsWon + gwPoints + blockBonus;
     return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints };
   });
 }
