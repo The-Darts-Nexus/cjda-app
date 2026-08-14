@@ -413,6 +413,22 @@ async function saveGdfEvent() {
   await loadAllData();
 }
 
+
+function getNightFormat(nightTypeId) {
+  const nt = state.nightTypes.find(t => t.id === nightTypeId);
+  if (!nt) return 'singles';
+  const n = nt.name.toLowerCase();
+  if (n.includes('triple')) return 'triples';
+  if (n.includes('double')) return 'doubles';
+  return 'singles';
+}
+
+function getPlayersPerSlot(format) {
+  if (format === 'triples') return 3;
+  if (format === 'doubles') return 2;
+  return 1;
+}
+
 async function refreshData() { await loadAllData(); showToast('Data refreshed'); }
 
 
@@ -523,8 +539,11 @@ function setBlockSize(blockIdx, size) {
   render();
 }
 
-function setBlockSlot(blockIdx, slotIdx, playerId) {
-  state.nightBlocks[blockIdx].slots[slotIdx] = playerId || null;
+function setBlockSlot(blockIdx, slotIdx, subSlot, playerId) {
+  if (!Array.isArray(state.nightBlocks[blockIdx].slots[slotIdx])) {
+    state.nightBlocks[blockIdx].slots[slotIdx] = [];
+  }
+  state.nightBlocks[blockIdx].slots[slotIdx][subSlot] = playerId || null;
   render();
 }
 
@@ -542,6 +561,37 @@ function updateLeg(blockIdx, row, col, val) {
   const v = Math.max(0, Math.min(3, parseInt(val) || 0));
   state.nightBlocks[blockIdx].legs[row][col] = v;
   render();
+}
+
+
+
+function handleAttribSelect(blockIdx, slotIdx, type, selectEl) {
+  const playerId = selectEl.value;
+  if (!playerId) return;
+  selectEl.value = '';
+  if (type === 'hc') {
+    const val = prompt('High Close value (90-170):', '100');
+    if (!val) return;
+    addAccoladeRecord(blockIdx, slotIdx, 'hc', playerId, parseInt(val)||100);
+  } else {
+    addAccoladeRecord(blockIdx, slotIdx, type, playerId, 1);
+  }
+}
+
+function addAccoladeRecord(blockIdx, slotIdx, type, playerId, value) {
+  const acc = state.nightBlocks[blockIdx].accolades[slotIdx];
+  if (!acc.records) acc.records = [];
+  acc.records.push({ type, playerId, value: value || 1 });
+  render();
+}
+
+function removeAccoladeRecord(blockIdx, slotIdx, recordIdx) {
+  state.nightBlocks[blockIdx].accolades[slotIdx].records.splice(recordIdx, 1);
+  render();
+}
+
+function updateAccoladeRecord(blockIdx, slotIdx, recordIdx, field, val) {
+  state.nightBlocks[blockIdx].accolades[slotIdx].records[recordIdx][field] = val;
 }
 
 function updateAccolade(blockIdx, slotIdx, type, val) {
@@ -569,7 +619,8 @@ function calcBlockStats(blockIdx) {
       legsWon += myLegs;
       if (myLegs > oppLegs) gamesWon++;
     }
-    const gamesPlayed = b.slots.filter((s, i) => i !== r && s).length;
+    const slotHasPlayer = (slot) => Array.isArray(slot) ? slot.some(p=>p) : !!slot;
+    const gamesPlayed = b.slots.filter((s, i) => i !== r && slotHasPlayer(s)).length;
     const gwPoints = gamesWon * 2;
     const totalPoints = legsWon + gwPoints + (b.bonus || 0);
     return { legsWon, gamesWon, gamesPlayed, gwPoints, totalPoints };
@@ -615,9 +666,13 @@ async function submitNight() {
       if (blockErr) throw blockErr;
 
       // Insert block players
-      const playerInserts = b.slots
-        .map((pid, idx) => pid ? { space_id: SPACE_ID, block_id: blockData.id, player_id: pid, slot_index: idx } : null)
-        .filter(Boolean);
+      const playerInserts = [];
+      b.slots.forEach((slot, idx) => {
+        const pids = Array.isArray(slot) ? slot : [slot];
+        pids.forEach((pid, subIdx) => {
+          if (pid) playerInserts.push({ space_id: SPACE_ID, block_id: blockData.id, player_id: pid, slot_index: idx, sub_slot: subIdx });
+        });
+      });
       if (playerInserts.length) {
         const { error: bpErr } = await sb.from('block_players').insert(playerInserts);
         if (bpErr) throw bpErr;
@@ -1435,14 +1490,35 @@ function renderBlockEntry() {
     (cat === 'men' ? ['men','junior_boy'].includes(p.category) : ['ladies','junior_girl'].includes(p.category))
   );
 
+  // Format detection
+  const bFmt = b.format || 'singles';
+  const bPps = getPlayersPerSlot(bFmt);
+  const bIsTeam = bFmt !== 'singles';
+
   // Build table rows
   const rows = Array.from({length: N}, (_, r) => {
-    const pid = b.slots[r];
-    const player = pid ? state.players.find(p => p.id === pid) : null;
-    const playerName = player ? `${player.first_name} ${player.last_name}`.trim() : '';
+    // Get team players for this slot
+    const teamSlot = Array.isArray(b.slots[r]) ? b.slots[r] : [b.slots[r]];
+    const hasPlayer = teamSlot.some(p => p);
+    const teamPlayers = teamSlot.map(pid => pid ? state.players.find(p => p.id === pid) : null);
     const s = stats[r];
-    const acc = b.accolades[r];
+    const acc = b.accolades[r] || { records: [] };
+    const records = acc.records || [];
 
+    // Player selection cell
+    const playerSelects = Array.from({length: bPps}, (_, si) => {
+      const pid = teamSlot[si] || '';
+      const label = bPps === 1 ? '(empty)' : si === 0 ? 'Player 1' : si === 1 ? 'Player 2' : 'Player 3';
+      return `<div style="margin-bottom:${si<bPps-1?'2px':'0'}">
+        <select style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:2px 4px;font-size:0.72rem"
+          onchange="setBlockSlot(${state.activeBlockIdx},${r},${si},this.value)" ${night.viewOnly?'disabled':''}>
+          <option value="">${label}</option>
+          ${state.players.map(p => `<option value="${p.id}" ${pid===p.id?'selected':''}>${p.first_name} ${p.last_name}</option>`).join('')}
+        </select>
+      </div>`;
+    }).join('');
+
+    // Leg cells — use first slot player for disabled check
     const legCells = Array.from({length: N}, (_, c) => {
       if (c === r) return `<td style="background:#1A1A1A;width:32px"></td>`;
       const val = b.legs[r][c] || 0;
@@ -1451,46 +1527,69 @@ function renderBlockEntry() {
         <input type="number" min="0" max="3" value="${val}"
           style="width:34px;background:transparent;border:none;color:var(--text);text-align:center;padding:3px 2px;font-size:0.9rem;font-family:'Share Tech Mono',monospace;font-weight:700"
           onchange="updateLeg(${state.activeBlockIdx},${r},${c},this.value)"
-          ${(!pid || night.viewOnly) ? 'disabled' : ''}>
+          ${(!hasPlayer || night.viewOnly) ? 'disabled' : ''}>
       </td>`;
     }).join('');
 
+    // Accolade cells
+    let accoladeCells = '';
+    if (!bIsTeam) {
+      // Singles — flat inputs
+      accoladeCells = `
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc['180']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'180',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc['171']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'171',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <div style="display:flex;gap:2px;align-items:center;justify-content:center">
+          <input type="number" min="0" value="${acc.hc||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+          <input type="number" min="90" max="170" value="${acc.hc_value||''}" placeholder="val" style="width:38px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc_value',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+        </div>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <div style="display:flex;gap:2px;align-items:center;justify-content:center">
+          <input type="number" min="0" value="${acc.l15||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+          <input type="number" min="9" max="14" value="${acc.l15_value||''}" placeholder="darts" style="width:44px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15_value',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+        </div>
+      </td>
+      <td style="padding:4px 6px;text-align:center">
+        <input type="number" min="0" value="${acc['9dart']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'9dart',this.value)" ${!hasPlayer||night.viewOnly?'disabled':''}>
+      </td>`;
+    } else {
+      // Doubles/Triples — attribution dropdowns
+      const validPlayers = teamPlayers.filter(Boolean);
+      const attribCell = (type, color) => {
+        const typeRecs = records.map((rec,i)=>({...rec,i})).filter(rec => rec.type === type);
+        const chips = typeRecs.map(rec => {
+          const pl = state.players.find(p => p.id === rec.playerId);
+          const nm = pl ? pl.first_name : '?';
+          const extra = type === 'hc' ? ` (${rec.value||'?'})` : '';
+          return `<span style="display:inline-flex;align-items:center;gap:2px;background:${color};border-radius:3px;padding:1px 5px;font-size:0.65rem;margin:1px;white-space:nowrap">${nm}${extra}<span onclick="removeAccoladeRecord(${state.activeBlockIdx},${r},${rec.i})" style="cursor:pointer;color:var(--red);margin-left:2px">×</span></span>`;
+        }).join('');
+        const opts = validPlayers.map(pl => `<option value="${pl.id}">${pl.first_name}</option>`).join('');
+        const addBtn = !night.viewOnly && validPlayers.length ? `<select onchange="handleAttribSelect(${state.activeBlockIdx},${r},'${type}',this)" style="font-size:0.65rem;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--green-accent);padding:1px 3px;margin-top:2px"><option value="">+ ${type.toUpperCase()}</option>${opts}</select>` : '';
+        return `<td style="padding:3px 4px;vertical-align:top">${chips}${addBtn}</td>`;
+      };
+      accoladeCells = attribCell('180','rgba(204,0,0,0.3)') + attribCell('171','rgba(45,106,45,0.4)') + attribCell('hc','rgba(255,165,0,0.3)')
+        + `<td style="padding:3px 4px;text-align:center;color:var(--text-muted);font-size:0.65rem">—</td>`
+        + `<td style="padding:3px 4px;text-align:center;color:var(--text-muted);font-size:0.65rem">—</td>`;
+    }
+
     return `<tr style="${r%2===0?'':'background:rgba(45,106,45,0.05)'}">
       <td style="padding:4px 6px;text-align:center;font-size:0.72rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;font-weight:700">${r+1}</td>
-      <td style="padding:4px 6px;min-width:130px">
-        <select style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:0.75rem;font-family:'Rajdhani',sans-serif"
-          onchange="setBlockSlot(${state.activeBlockIdx},${r},this.value)">
-          <option value="">(empty)</option>
-          ${state.players.map(p => `<option value="${p.id}" ${pid===p.id?'selected':''}>${p.first_name} ${p.last_name}</option>`).join('')}
-        </select>
-      </td>
+      <td style="padding:4px 6px;min-width:${bIsTeam?'200px':'130px'}">${playerSelects}</td>
       ${legCells}
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesPlayed : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesWon : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
       <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">
-        ${r===0
-          ? `<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">`
-          : `<span style="color:var(--text-muted)">${b.bonus||0}</span>`}
+        ${r===0 ? `<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">` : `<span style="color:var(--text-muted)">${b.bonus||0}</span>`}
       </td>
       <td style="padding:4px 6px;text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
-      <td style="padding:4px 6px;text-align:center">
-        <input type="number" min="0" value="${acc['180']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'180',this.value)" ${!pid?'disabled':''}>
-      </td>
-      <td style="padding:4px 6px;text-align:center">
-        <input type="number" min="0" value="${acc['171']||0}" style="width:32px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'171',this.value)" ${!pid?'disabled':''}>
-      </td>
-      <td style="padding:4px 6px;text-align:center;display:flex;gap:2px;align-items:center">
-        <input type="number" min="0" value="${acc.hc||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc',this.value)" ${!pid?'disabled':''}>
-        <input type="number" min="90" max="170" value="${acc.hc_value||''}" placeholder="val" style="width:38px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'hc_value',this.value)" ${!pid?'disabled':''}>
-      </td>
-      <td style="padding:4px 6px;text-align:center">
-        <div style="display:flex;gap:2px;align-items:center;justify-content:center">
-          <input type="number" min="0" value="${acc.l15||0}" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15',this.value)" ${!pid?'disabled':''}>
-          <input type="number" min="9" max="14" value="${acc.l15_value||''}" placeholder="darts" style="width:44px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateAccolade(${state.activeBlockIdx},${r},'l15_value',this.value)" ${!pid?'disabled':''}>
-        </div>
-      </td>
+      ${accoladeCells}
       <td style="padding:4px 6px;text-align:center;font-weight:700;color:var(--green-accent);font-size:0.82rem">${positions[r] || ''}</td>
     </tr>`;
   }).join('');
@@ -1527,7 +1626,7 @@ function renderBlockEntry() {
       <!-- Block size selector -->
       <div style="display:flex;align-items:center;gap:8px">
         <label class="form-label" style="margin:0">Players in block:</label>
-        ${[3,4,5,6].map(n => `<button class="btn ${N===n?'btn-primary':'btn-ghost'}" style="padding:3px 10px;font-size:0.72rem" onclick="setBlockSize(${state.activeBlockIdx},${n})">${n}</button>`).join('')}
+        <div style="display:flex;gap:2px;flex-wrap:wrap">${N===3?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},3)">3</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},3)">3</button>`}${N===4?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},4)">4</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},4)">4</button>`}${N===5?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},5)">5</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},5)">5</button>`}${N===6?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},6)">6</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},6)">6</button>`}${N===7?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},7)">7</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},7)">7</button>`}${N===8?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},8)">8</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},8)">8</button>`}${N===9?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},9)">9</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},9)">9</button>`}${N===10?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},10)">10</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},10)">10</button>`}${N===11?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},11)">11</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},11)">11</button>`}${N===12?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},12)">12</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},12)">12</button>`}${N===13?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},13)">13</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},13)">13</button>`}${N===14?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},14)">14</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},14)">14</button>`}${N===15?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},15)">15</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},15)">15</button>`}${N===16?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},16)">16</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},16)">16</button>`}${N===17?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},17)">17</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},17)">17</button>`}${N===18?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},18)">18</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},18)">18</button>`}${N===19?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},19)">19</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},19)">19</button>`}${N===20?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},20)">20</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},20)">20</button>`}</div>
       </div>
 
       <!-- Block sheet table -->
