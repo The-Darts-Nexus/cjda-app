@@ -155,6 +155,8 @@ const state = {
   activeNight: null,        // night being worked on
   activeBlockIdx: 0,        // which block tab is active
   nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
+  nightAttendance: [],      // night_attendance rows (register)
+  assistant: { open: false, layoutIdx: 0, search: '' }, // Schedule Assistant panel
   // Data
   players: [],
   seasons: [],
@@ -250,6 +252,7 @@ async function loadAllData() {
     state.blockPlayers = await run(sb.from('block_players').select('*').eq('space_id', SPACE_ID));
     state.gdfEvents    = await run(sb.from('gdf_events').select('id,name,date,end_date,event_type').eq('space_id', SPACE_ID).order('date'));
     state.gdfAttendance= await run(sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID));
+    state.nightAttendance = await run(sb.from('night_attendance').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
     console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
@@ -400,6 +403,43 @@ async function toggleGdfAttendance(eventId, playerId, attended) {
   }
   const { data } = await sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID);
   state.gdfAttendance = data || [];
+  render();
+}
+
+// ── Schedule Assistant: night register ──────────────────────────
+function nightRegisteredIds() {
+  if (!state.activeNight) return [];
+  return (state.nightAttendance || [])
+    .filter(a => a.night_id === state.activeNight.id)
+    .map(a => a.player_id);
+}
+
+async function toggleNightAttendance(playerId, present) {
+  if (!state.activeNight || !isAdmin()) return;
+  const nightId = state.activeNight.id;
+  if (present) {
+    const { error } = await sb.from('night_attendance').insert({ space_id: SPACE_ID, night_id: nightId, player_id: playerId });
+    if (error && !error.message.includes('duplicate')) { showToast(error.message, 'error'); return; }
+  } else {
+    await sb.from('night_attendance').delete().eq('night_id', nightId).eq('player_id', playerId);
+  }
+  const { data } = await sb.from('night_attendance').select('*').eq('space_id', SPACE_ID);
+  state.nightAttendance = data || [];
+  render();
+}
+
+async function setNightAttendanceBulk(playerIds, present) {
+  if (!state.activeNight || !isAdmin() || !playerIds.length) return;
+  const nightId = state.activeNight.id;
+  if (present) {
+    const rows = playerIds.map(pid => ({ space_id: SPACE_ID, night_id: nightId, player_id: pid }));
+    const { error } = await sb.from('night_attendance').upsert(rows, { onConflict: 'night_id,player_id', ignoreDuplicates: true });
+    if (error) { showToast(error.message, 'error'); return; }
+  } else {
+    await sb.from('night_attendance').delete().eq('night_id', nightId).in('player_id', playerIds);
+  }
+  const { data } = await sb.from('night_attendance').select('*').eq('space_id', SPACE_ID);
+  state.nightAttendance = data || [];
   render();
 }
 
@@ -627,6 +667,104 @@ function addBlock() {
   });
   state.activeBlockIdx = state.nightBlocks.length - 1;
   render();
+}
+
+// ── Schedule Assistant: block layout suggestions + random draw ───
+// Hard rule: once any leg score exists in the night, blocks are frozen.
+function nightHasAnyLegs() {
+  return (state.nightBlocks || []).some(b =>
+    (b.legs || []).some(row => (row || []).some(v => (parseInt(v) || 0) > 0)));
+}
+
+// Up to 3 candidate block layouts for n players — each block 3..maxSize, sum === n.
+function blockLayoutSuggestions(n) {
+  n = parseInt(n) || 0;
+  if (n < 3) return [];
+  const maxSize = Math.max(5, Math.ceil(n / 6)); // auto-bump so blocks stay <= 6
+  const MIN = 3;
+
+  const fillFirst = () => {
+    const sizes = [];
+    let r = n;
+    while (r > 0) { const take = Math.min(maxSize, r); sizes.push(take); r -= take; }
+    // pull from the rightmost earlier block that can spare one, until the tail is >= MIN
+    let guard = 0;
+    while (sizes.length >= 2 && sizes[sizes.length - 1] < MIN && guard++ < 100) {
+      let moved = false;
+      for (let j = sizes.length - 2; j >= 0; j--) {
+        if (sizes[j] - 1 >= MIN) { sizes[j]--; sizes[sizes.length - 1]++; moved = true; break; }
+      }
+      if (!moved) break;
+    }
+    return sizes;
+  };
+
+  const even = (blocks) => {
+    if (blocks < 1) return null;
+    const base = Math.floor(n / blocks);
+    const rem = n % blocks;
+    const sizes = [];
+    for (let i = 0; i < blocks; i++) sizes.push(base + (i < rem ? 1 : 0));
+    if (sizes.some(s => s < MIN || s > maxSize)) return null;
+    return sizes;
+  };
+
+  const minBlocks = Math.ceil(n / maxSize);
+  const raw = [fillFirst(), even(minBlocks), even(Math.min(6, minBlocks + 1))];
+
+  const seen = new Set();
+  const out = [];
+  raw.forEach(sizes => {
+    if (!sizes || !sizes.length) return;
+    if (sizes.reduce((a, b) => a + b, 0) !== n) return;
+    if (sizes.some(s => s < MIN)) return;
+    const sig = sizes.slice().sort((a, b) => b - a).join('-');
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    out.push(sizes.slice().sort((a, b) => b - a));
+  });
+  return out.slice(0, 3);
+}
+
+async function generateBlocksFromRegister() {
+  if (!state.activeNight || !isAdmin()) return;
+  if (nightHasAnyLegs()) { showToast('Blocks are locked — leg scores have been entered', 'error'); return; }
+
+  const ids = nightRegisteredIds();
+  if (ids.length < 3) { showToast('Register at least 3 players first', 'error'); return; }
+
+  const layouts = blockLayoutSuggestions(ids.length);
+  const sizes = layouts[state.assistant.layoutIdx] || layouts[0];
+  if (!sizes) { showToast('No valid block layout for that number of players', 'error'); return; }
+
+  const hasPlacements = (state.nightBlocks || []).some(b => (b.slots || []).some(s => Array.isArray(s) ? s.some(Boolean) : s));
+  if (hasPlacements && !confirm(`Replace the current blocks with a fresh random draw of ${ids.length} registered players?`)) return;
+
+  // Fisher–Yates shuffle
+  const pool = ids.slice();
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  let offset = 0;
+  state.nightBlocks = sizes.map((size, i) => {
+    const slots = Array.from({ length: size }, (_, k) => pool[offset + k] || null);
+    offset += size;
+    return {
+      label: `Block ${i + 1}`,
+      size,
+      format: 'singles',
+      slots,
+      legs: Array.from({ length: size }, () => Array(size).fill(0)),
+      accolades: Array.from({ length: size }, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '', '9dart': 0, records: [] })),
+      bonus: 0
+    };
+  });
+  state.activeBlockIdx = 0;
+  state.assistant.open = false;
+  showToast(`Drew ${ids.length} players into ${sizes.length} block${sizes.length !== 1 ? 's' : ''}`);
+  await saveNightDraft();
 }
 
 function removeLastBlock() {
@@ -1884,6 +2022,103 @@ function renderRoundsLookup(blockIdx) {
     </div>`);
 }
 
+// ── Schedule Assistant panel — register tonight's players, draw blocks ──
+function renderScheduleAssistant() {
+  const night = state.activeNight;
+  if (!night || night.viewOnly || !isAdmin()) return '';
+  if (isCompNight(night.night_type_id) || getNightFormat(night.night_type_id) !== 'singles') return '';
+
+  const regIds = nightRegisteredIds();
+  const regSet = new Set(regIds);
+  const n = regIds.length;
+  const locked = nightHasAnyLegs();
+  const a = state.assistant;
+
+  if (!a.open) {
+    return `
+      <div class="card" style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-left:4px solid var(--green-accent)">
+        <div>
+          <span style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.08em;color:var(--text)">📋 Schedule Assistant</span>
+          <span style="font-size:0.74rem;color:var(--text-muted);margin-left:8px">${locked ? '🔒 Blocks locked — results entered' : 'Register players & draw blocks'}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:0.74rem;color:var(--text-muted)">${n} registered</span>
+          <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 12px" onclick="state.assistant.open=true;render()">${locked ? 'View' : 'Open'}</button>
+        </div>
+      </div>`;
+  }
+
+  const players = (state.players || []).slice().sort((x, y) =>
+    (x.last_name || '').localeCompare(y.last_name || '') || (x.first_name || '').localeCompare(y.first_name || ''));
+  const q = (a.search || '').trim().toLowerCase();
+  const shown = players.filter(p => !q || `${p.first_name} ${p.last_name}`.toLowerCase().includes(q));
+  const catTag = (c) => ({ men: 'M', ladies: 'L', junior_boy: 'JB', junior_girl: 'JG' }[c] || '');
+
+  const listRows = shown.map(p => {
+    const on = regSet.has(p.id);
+    const nm = pickerAttr(`${p.first_name} ${p.last_name}`);
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid var(--border);cursor:${locked ? 'default' : 'pointer'};font-size:0.78rem${on ? ';background:rgba(45,106,45,0.10)' : ''}">
+      <input type="checkbox" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''} onchange="toggleNightAttendance('${p.id}', this.checked)" style="width:15px;height:15px">
+      <span style="flex:1;color:var(--text)">${nm}</span>
+      ${catTag(p.category) ? `<span style="font-size:0.6rem;color:var(--text-muted);border:1px solid var(--border);border-radius:3px;padding:0 4px">${catTag(p.category)}</span>` : ''}
+      ${p.status === 'temp' ? `<span style="font-size:0.6rem;color:#FF6666;border:1px solid rgba(204,0,0,0.3);border-radius:3px;padding:0 4px">TEMP</span>` : ''}
+    </label>`;
+  }).join('');
+
+  // layout picker
+  const layouts = blockLayoutSuggestions(n);
+  if (a.layoutIdx >= layouts.length) a.layoutIdx = 0;
+  const layoutHtml = n < 3
+    ? `<div style="font-size:0.76rem;color:var(--text-muted);padding:6px 0">Register at least 3 players to draw blocks.</div>`
+    : layouts.map((sizes, i) => `
+        <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;font-size:0.8rem">
+          <input type="radio" name="assistant-layout" ${i === a.layoutIdx ? 'checked' : ''} onchange="state.assistant.layoutIdx=${i};render()" style="width:15px;height:15px">
+          <span style="color:var(--text)"><strong>${sizes.length} block${sizes.length !== 1 ? 's' : ''}</strong>&nbsp;&nbsp;${sizes.join(' · ')}</span>
+        </label>`).join('');
+
+  const shownIdsJson = pickerAttr(JSON.stringify(shown.map(p => p.id)));
+
+  return `
+    <div class="card" style="padding:14px;border-left:4px solid var(--green-accent)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:0.08em;color:var(--text)">📋 Schedule Assistant</span>
+        <button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 10px" onclick="state.assistant.open=false;render()">✕ Close</button>
+      </div>
+
+      ${locked ? `<div style="font-size:0.74rem;color:#FF6666;background:rgba(204,0,0,0.1);border:1px solid rgba(204,0,0,0.3);border-radius:6px;padding:8px 10px;margin-bottom:10px">🔒 Leg scores have been entered — the block draw is locked for the night. The register below is read-only.</div>` : ''}
+
+      <div style="display:grid;grid-template-columns:1fr;gap:14px">
+
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+            <label class="form-label" style="margin:0">Register — ${n} of ${players.length}</label>
+            ${!locked ? `
+              <button class="btn btn-ghost" style="font-size:0.66rem;padding:3px 8px" onclick='setNightAttendanceBulk(${shownIdsJson}, true)'>Select all shown</button>
+              <button class="btn btn-ghost" style="font-size:0.66rem;padding:3px 8px" onclick='setNightAttendanceBulk(${shownIdsJson}, false)'>Clear all shown</button>
+            ` : ''}
+          </div>
+          <input type="text" class="form-input" placeholder="Search players…" value="${pickerAttr(a.search || '')}"
+            oninput="state.assistant.search=this.value;render()" style="font-size:0.76rem;padding:5px 8px;margin-bottom:6px">
+          <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--card2)">
+            ${listRows || '<div style="padding:10px;font-size:0.75rem;color:var(--text-muted)">No players match.</div>'}
+          </div>
+        </div>
+
+        ${!locked ? `
+          <div>
+            <label class="form-label" style="margin:0 0 4px">Block layout</label>
+            ${layoutHtml}
+            <button class="btn btn-primary" style="width:100%;margin-top:8px;padding:10px;font-size:0.82rem;letter-spacing:0.06em" ${n < 3 ? 'disabled' : ''} onclick="generateBlocksFromRegister()">
+              ⚡ Generate Blocks
+            </button>
+            <div style="text-align:center;font-size:0.68rem;color:var(--text-muted);margin-top:6px">Random draw into the chosen layout. Saves as a draft. You can still adjust players by hand afterwards.</div>
+          </div>
+        ` : ''}
+
+      </div>
+    </div>`;
+}
+
 function renderBlockEntry() {
   const night = state.activeNight;
   const nightTypeName = night.night_type_id ? state.nightTypes.find(nt=>nt.id===night.night_type_id)?.name||'League Night' : 'League Night';
@@ -2032,6 +2267,8 @@ function renderBlockEntry() {
 
   return `
     <div style="padding:16px;display:flex;flex-direction:column;gap:14px;max-width:1400px;margin:0 auto">
+
+      ${renderScheduleAssistant()}
 
       <!-- Setup card -->
       <div class="card" style="padding:14px">
@@ -2209,6 +2446,7 @@ async function deleteNight(nightId) {
   if (!isAdmin()) return;
   if (!confirm('Delete this night and all its results? This cannot be undone.')) return;
   try {
+    await sb.from('night_attendance').delete().eq('night_id', nightId);
     await sb.from('accolades').delete().eq('night_id', nightId);
     await sb.from('results').delete().eq('night_id', nightId);
     const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
@@ -2228,7 +2466,8 @@ async function deleteCompetition(nightId) {
   if (!isAdmin()) return;
   if (!confirm('Delete this competition and all its results? This cannot be undone.')) return;
   try {
-    // Delete accolades, results, block_players, blocks, then night
+    // Delete attendance, accolades, results, block_players, blocks, then night
+    await sb.from('night_attendance').delete().eq('night_id', nightId);
     await sb.from('accolades').delete().eq('night_id', nightId);
     await sb.from('results').delete().eq('night_id', nightId);
     const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
