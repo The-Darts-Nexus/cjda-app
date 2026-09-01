@@ -54,6 +54,12 @@
   .data-table tr:hover td { background: rgba(45,106,45,0.1); }
   .data-table .rank { font-family: 'Share Tech Mono', monospace; color: var(--text-muted); font-size: 0.7rem; width: 28px; }
   .data-table .points { color: var(--green-accent); font-weight: 700; font-size: 0.85rem; }
+  /* Block sheet (Night Setup) */
+  .block-sheet { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+  .block-sheet th { background: var(--green-dark); color: var(--text-muted); font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 5px 6px; text-align: center; border: 1px solid var(--border); white-space: nowrap; }
+  .block-sheet th.acc-band { background: rgba(204,0,0,0.22); color: #ffc9c9; }
+  .block-sheet td { padding: 4px 6px; border: 1px solid var(--border); }
+  .block-sheet tbody tr:nth-child(even) { background: rgba(45,106,45,0.06); }
   /* Buttons */
   .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.05em; cursor: pointer; border: none; transition: all 0.15s; }
   .btn-primary { background: var(--green); color: white; }
@@ -452,7 +458,7 @@ async function viewNight(nightId) {
         const ai = slots.indexOf(r.away_player_id);
         if (hi >= 0 && ai >= 0) { legs[hi][ai] = r.home_legs; legs[ai][hi] = r.away_legs; }
       });
-      const accoladesArr = Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0 }));
+      const accoladesArr = Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, '9dart': 0 }));
       accs.filter(a => slots.includes(a.player_id)).forEach(a => {
         const idx = slots.indexOf(a.player_id);
         if (idx < 0) return;
@@ -460,6 +466,7 @@ async function viewNight(nightId) {
         else if (a.accolade_type === '171') accoladesArr[idx]['171']++;
         else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') { accoladesArr[idx].hc++; accoladesArr[idx].hc_value = a.value; }
         else if (a.accolade_type === '15_dart') { accoladesArr[idx].l15++; accoladesArr[idx].l15_value = String(a.value || 14); }
+        else if (a.accolade_type === '9_darter') accoladesArr[idx]['9dart']++;
       });
       return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id };
     });
@@ -506,7 +513,8 @@ async function openNightEntry(nightId) {
   try {
     // Load existing blocks from database for this night
     const { data: blocks } = await sb.from('blocks').select('*').eq('night_id', nightId).order('block_label');
-    
+    state.nightHasSavedDraft = !!(blocks && blocks.length > 0);
+
     if (blocks && blocks.length > 0) {
       // Blocks exist - load them for editing
       const { data: bps } = await sb.from('block_players').select('*').in('block_id', blocks.map(b => b.id));
@@ -540,11 +548,11 @@ async function openNightEntry(nightId) {
         });
         
         // Reconstruct accolades
-        const accoladesArr = Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '', records: [] }));
+        const accoladesArr = Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '', '9dart': 0, records: [] }));
         (accs || []).forEach(a => {
           const slotIdx = slots.findIndex(s => Array.isArray(s) ? s.includes(a.player_id) : s === a.player_id);
           if (slotIdx < 0) return;
-          
+
           if (a.accolade_type === '180') accoladesArr[slotIdx]['180']++;
           else if (a.accolade_type === '171') accoladesArr[slotIdx]['171']++;
           else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') {
@@ -555,6 +563,8 @@ async function openNightEntry(nightId) {
           } else if (a.accolade_type === '15_dart') {
             accoladesArr[slotIdx].l15++;
             accoladesArr[slotIdx].l15_value = String(a.value || 14);
+          } else if (a.accolade_type === '9_darter') {
+            accoladesArr[slotIdx]['9dart']++;
           }
         });
         
@@ -589,15 +599,16 @@ async function openNightEntry(nightId) {
 function backFromNightEntry() {
   // Check if there's unsaved data
   const hasChanges = state.nightBlocks.some(b => b.slots.some(s => s));
-  
+
   if (hasChanges) {
-    const confirmed = confirm('You have unsaved changes. Leave without saving?\n\nYour data will be lost!');
+    const confirmed = confirm('You have unsaved changes. Leave without saving?\n\nUnsaved data will be lost — use Save Draft first to keep it.');
     if (!confirmed) return;
   }
-  
+
   state.activeNight = null;
   state.nightBlocks = [];
   state.competitionNightId = null;
+  state.nightHasSavedDraft = false;
   render();
 }
 
@@ -852,75 +863,9 @@ async function submitNight() {
   state.loading = true; render();
 
   try {
-    const seasonId = getActiveSeasonId();
-
-    for (const b of state.nightBlocks) {
-      // Insert block
-      const { data: blockData, error: blockErr } = await sb.from('blocks').insert({
-        space_id: SPACE_ID,
-        night_id: state.activeNight.id,
-        game_type_id: state.gameTypes[0]?.id || null,
-        block_label: b.label,
-        size: b.size,
-        bonus: b.bonus || 0,
-        status: 'locked'
-      }).select().single();
-      if (blockErr) throw blockErr;
-
-      // Insert block players
-      const playerInserts = [];
-      b.slots.forEach((slot, idx) => {
-        const pids = Array.isArray(slot) ? slot : [slot];
-        pids.forEach((pid, subIdx) => {
-          if (pid) playerInserts.push({ space_id: SPACE_ID, block_id: blockData.id, player_id: pid, slot_index: idx, sub_slot: subIdx });
-        });
-      });
-      if (playerInserts.length) {
-        const { error: bpErr } = await sb.from('block_players').insert(playerInserts);
-        if (bpErr) throw bpErr;
-      }
-
-      // Insert results (all match pairs)
-      const resultInserts = [];
-      for (let r = 0; r < b.size; r++) {
-        for (let c = r + 1; c < b.size; c++) {
-          if (!b.slots[r] || !b.slots[c]) continue;
-          resultInserts.push({
-            space_id: SPACE_ID,
-            block_id: blockData.id,
-            night_id: state.activeNight.id,
-            season_id: seasonId,
-            home_player_id: b.slots[r],
-            away_player_id: b.slots[c],
-            home_legs: b.legs[r][c] || 0,
-            away_legs: b.legs[c][r] || 0
-          });
-        }
-      }
-      if (resultInserts.length) {
-        const { error: resErr } = await sb.from('results').insert(resultInserts);
-        if (resErr) throw resErr;
-      }
-
-      // Insert accolades
-      const accInserts = [];
-      b.accolades.forEach((acc, slotIdx) => {
-        const pid = b.slots[slotIdx];
-        if (!pid) return;
-        if (acc['180'] > 0) for (let i = 0; i < acc['180']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '180', value: 1 });
-        if (acc['171'] > 0) for (let i = 0; i < acc['171']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '171', value: 1 });
-        if (acc.hc > 0 && acc.hc_value) {
-          const hcVal = parseInt(acc.hc_value) || 0;
-          const accType = hcVal === 170 ? '170_close' : 'high_close';
-          for (let i = 0; i < acc.hc; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: accType, value: hcVal });
-        }
-        if (acc.l15 > 0) { const l15Val = parseInt(acc.l15_value) || 14; for (let i = 0; i < acc.l15; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '15_dart', value: l15Val }); }
-      });
-      if (accInserts.length) {
-        const { error: accErr } = await sb.from('accolades').insert(accInserts);
-        if (accErr) throw accErr;
-      }
-    }
+    // Remove any previously saved draft rows for this night so submit never duplicates
+    await purgeNightBlockData(state.activeNight.id);
+    await writeNightBlocks('locked');
 
     // Lock the night
     await sb.from('nights').update({ status: 'locked' }).eq('id', state.activeNight.id);
@@ -928,6 +873,7 @@ async function submitNight() {
     showToast('Night submitted successfully!', 'success');
     state.activeNight = null;
     state.nightBlocks = [];
+    state.nightHasSavedDraft = false;
     await loadAllData();
 
   } catch(e) {
@@ -935,6 +881,167 @@ async function submitNight() {
     showToast('Error submitting night: ' + e.message, 'error');
   }
   state.loading = false; render();
+}
+
+// ═══════════════════════════════════════════════
+// NIGHT BLOCK PERSISTENCE — shared by Submit + Save Draft
+// ═══════════════════════════════════════════════
+async function purgeNightBlockData(nightId) {
+  await sb.from('accolades').delete().eq('night_id', nightId);
+  await sb.from('results').delete().eq('night_id', nightId);
+  const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
+  if (blocks && blocks.length) {
+    await sb.from('block_players').delete().in('block_id', blocks.map(b => b.id));
+  }
+  await sb.from('blocks').delete().eq('night_id', nightId);
+}
+
+async function writeNightBlocks(blockStatus) {
+  const seasonId = getActiveSeasonId();
+
+  for (const b of state.nightBlocks) {
+    // Insert block
+    const { data: blockData, error: blockErr } = await sb.from('blocks').insert({
+      space_id: SPACE_ID,
+      night_id: state.activeNight.id,
+      game_type_id: state.gameTypes[0]?.id || null,
+      block_label: b.label,
+      size: b.size,
+      bonus: b.bonus || 0,
+      status: blockStatus
+    }).select().single();
+    if (blockErr) throw blockErr;
+
+    // Insert block players
+    const playerInserts = [];
+    b.slots.forEach((slot, idx) => {
+      const pids = Array.isArray(slot) ? slot : [slot];
+      pids.forEach((pid, subIdx) => {
+        if (pid) playerInserts.push({ space_id: SPACE_ID, block_id: blockData.id, player_id: pid, slot_index: idx, sub_slot: subIdx });
+      });
+    });
+    if (playerInserts.length) {
+      const { error: bpErr } = await sb.from('block_players').insert(playerInserts);
+      if (bpErr) throw bpErr;
+    }
+
+    // Insert results (all match pairs)
+    const resultInserts = [];
+    for (let r = 0; r < b.size; r++) {
+      for (let c = r + 1; c < b.size; c++) {
+        if (!b.slots[r] || !b.slots[c]) continue;
+        resultInserts.push({
+          space_id: SPACE_ID,
+          block_id: blockData.id,
+          night_id: state.activeNight.id,
+          season_id: seasonId,
+          home_player_id: b.slots[r],
+          away_player_id: b.slots[c],
+          home_legs: b.legs[r][c] || 0,
+          away_legs: b.legs[c][r] || 0
+        });
+      }
+    }
+    if (resultInserts.length) {
+      const { error: resErr } = await sb.from('results').insert(resultInserts);
+      if (resErr) throw resErr;
+    }
+
+    // Insert accolades
+    const accInserts = [];
+    b.accolades.forEach((acc, slotIdx) => {
+      const pid = b.slots[slotIdx];
+      if (!pid) return;
+      if (acc['180'] > 0) for (let i = 0; i < acc['180']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '180', value: 1 });
+      if (acc['171'] > 0) for (let i = 0; i < acc['171']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '171', value: 1 });
+      if (acc.hc > 0 && acc.hc_value) {
+        const hcVal = parseInt(acc.hc_value) || 0;
+        const accType = hcVal === 170 ? '170_close' : 'high_close';
+        for (let i = 0; i < acc.hc; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: accType, value: hcVal });
+      }
+      if (acc.l15 > 0) { const l15Val = parseInt(acc.l15_value) || 14; for (let i = 0; i < acc.l15; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '15_dart', value: l15Val }); }
+      if (acc['9dart'] > 0) for (let i = 0; i < acc['9dart']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '9_darter', value: 1 });
+    });
+    if (accInserts.length) {
+      const { error: accErr } = await sb.from('accolades').insert(accInserts);
+      if (accErr) throw accErr;
+    }
+  }
+}
+
+async function updateNightDate(value) {
+  if (!state.activeNight) return;
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  if (!value || value === state.activeNight.date) return;
+  const { error } = await sb.from('nights').update({ date: value }).eq('id', state.activeNight.id);
+  if (error) { showToast('Error updating date: ' + error.message, 'error'); return; }
+  state.activeNight.date = value;
+  const nn = state.nights.find(n => n.id === state.activeNight.id);
+  if (nn) nn.date = value;
+  showToast('Night date updated');
+  render();
+}
+
+async function saveNightDraft() {
+  if (!state.activeNight) return;
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  const hasData = state.nightBlocks.some(b => b.slots.some(s => s));
+  if (!hasData) { showToast('Assign at least one player before saving a draft', 'error'); return; }
+
+  state.loading = true; render();
+  try {
+    await purgeNightBlockData(state.activeNight.id);
+    await writeNightBlocks('draft');
+    await sb.from('nights').update({ status: 'draft' }).eq('id', state.activeNight.id);
+    state.nightHasSavedDraft = true;
+    showToast('Draft saved');
+    await loadAllData();
+    await openNightEntry(state.activeNight.id); // reload so blocks pick up their db ids
+    return;
+  } catch(e) {
+    console.error('Save draft error:', e);
+    showToast('Error saving draft: ' + e.message, 'error');
+  }
+  state.loading = false; render();
+}
+
+async function restoreNightDraft() {
+  if (!state.activeNight) return;
+  if (!confirm('Discard changes since the last saved draft and reload it?')) return;
+  await openNightEntry(state.activeNight.id);
+}
+
+async function clearNightDraft() {
+  if (!state.activeNight) return;
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  if (!confirm('Delete the saved draft for this night? The night stays, but all entered blocks, legs and accolades are removed.')) return;
+
+  state.loading = true; render();
+  try {
+    await purgeNightBlockData(state.activeNight.id);
+    state.nightHasSavedDraft = false;
+    state.nightBlocks = [];
+    addBlock();
+    showToast('Draft cleared');
+    await loadAllData();
+  } catch(e) {
+    console.error('Clear draft error:', e);
+    showToast('Error clearing draft: ' + e.message, 'error');
+  }
+  state.loading = false; render();
+}
+
+function clearActiveBlock() {
+  const b = state.nightBlocks[state.activeBlockIdx];
+  if (!b) return;
+  if (!confirm(`Clear all players, legs and accolades from ${b.label}? (This block only, not saved yet.)`)) return;
+  const fmt = b.format || 'singles';
+  const pps = getPlayersPerSlot(fmt);
+  b.slots = Array(b.size).fill(null).map(() => pps > 1 ? Array(pps).fill(null) : null);
+  b.legs = Array.from({length: b.size}, () => Array(b.size).fill(0));
+  b.accolades = Array.from({length: b.size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '', '9dart': 0, records: [] }));
+  b.bonus = 0;
+  render();
 }
 
 // ═══════════════════════════════════════════════
@@ -1676,6 +1783,107 @@ function renderNightSetup() {
     </div>`;
 }
 
+// ═══════════════════════════════════════════════
+// ROUND-ROBIN SCHEDULES  —  [slotA, slotB, scorerSlot], 1-based
+// Sizes 4-8 match the Key West app and the CJDA paper score sheet exactly.
+// Size 3 rotates the scorer; size 9 is from the paper sheet (18 rounds).
+// ═══════════════════════════════════════════════
+const MATCH_SCHEDULES = {
+  3: [ [[1,2,3]], [[1,3,2]], [[2,3,1]] ],
+  4: [ [[1,4,3]], [[2,3,4]], [[3,1,2]], [[4,2,1]], [[1,2,3]], [[3,4,2]] ],
+  5: [ [[2,5,1]], [[3,4,2]], [[5,1,3]], [[2,3,4]], [[1,4,5]], [[5,3,1]], [[4,2,5]], [[3,1,2]], [[4,5,3]], [[1,2,4]] ],
+  6: [ [[1,6,3],[2,5,4]], [[5,1,6],[3,4,2]], [[2,3,5],[6,4,1]], [[1,4,2],[5,3,6]], [[6,2,4],[3,1,5]], [[4,2,1],[5,6,3]], [[3,6,5],[1,2,4]], [[4,5,6]] ],
+  7: [ [[1,6,7],[2,5,3]], [[3,4,1],[7,5,2]], [[1,4,6],[2,3,7]], [[6,4,1],[7,3,5]], [[1,2,6],[5,3,4]], [[6,2,3],[7,1,5]], [[4,2,7],[5,1,6]], [[6,7,4],[3,1,5]], [[4,7,3],[5,6,1]], [[2,7,5],[3,6,4]], [[4,5,2]] ],
+  8: [ [[1,8,4],[2,7,5]], [[3,6,2],[4,5,7]], [[1,7,3],[6,8,4]], [[2,5,8],[3,4,6]], [[1,6,4],[5,7,3]], [[4,8,5],[2,3,7]], [[1,5,8],[4,6,2]], [[3,7,1],[2,8,5]], [[1,4,6],[3,5,8]], [[2,6,1],[7,8,3]], [[1,3,5],[2,4,7]], [[5,8,4],[6,7,2]], [[1,2,7],[3,8,6]], [[4,7,1],[5,6,3]] ],
+  9: [ [[1,8,9],[2,7,5]], [[3,6,1],[4,5,2]], [[9,7,8],[1,6,4]], [[2,5,9],[3,4,1]], [[8,6,7],[9,5,3]], [[1,4,8],[2,3,9]], [[7,5,6],[8,4,2]], [[9,3,7],[1,2,8]], [[6,4,5],[7,3,1]], [[8,2,6],[9,1,7]], [[5,3,4],[6,2,9]], [[7,1,5],[8,9,6]], [[4,2,3],[5,1,8]], [[6,9,4],[7,8,5]], [[3,1,2],[4,9,7]], [[5,8,3],[6,7,4]], [[2,9,1],[3,8,6]], [[4,7,2],[5,6,3]] ]
+};
+
+// Name shown for a 1-based slot in the round lookup (pair formats show first names)
+function playerNameForSlot(block, slotNum) {
+  const slot = block && block.slots ? block.slots[slotNum - 1] : null;
+  const ids = Array.isArray(slot) ? slot.filter(Boolean) : (slot ? [slot] : []);
+  if (!ids.length) return `Slot ${slotNum}`;
+  const names = ids.map(id => {
+    const p = state.players.find(x => x.id === id);
+    return p ? `${p.first_name} ${p.last_name}` : '?';
+  });
+  return ids.length > 1 ? names.map(n => n.split(' ')[0]).join(' / ') : names[0];
+}
+
+// "Rounds (Quick Lookup)" panel — fixed schedule + live status, per Key West
+function renderRoundsLookup(blockIdx) {
+  const b = state.nightBlocks[blockIdx];
+  if (!b) return '';
+  const N = b.size;
+  const rounds = MATCH_SCHEDULES[N];
+  const label = b.label || `Block ${blockIdx + 1}`;
+
+  const shell = (inner) => `
+    <div class="card" style="padding:14px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em;color:var(--green-accent);font-weight:700;text-transform:uppercase">Rounds (Quick Lookup)</div>
+          <div style="font-size:0.72rem;color:var(--text-muted)">Block ${label} • Best of 3 legs • Scorer shown per match</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-muted)">${N}-player schedule</div>
+      </div>
+      ${inner}
+    </div>`;
+
+  if (!rounds || !rounds.length) {
+    return shell(`<div style="font-size:0.75rem;color:var(--text-muted)">No predefined schedule for ${N} players.</div>`);
+  }
+
+  const legsFor = (aS, bS) => ({
+    a: (b.legs[aS - 1] && b.legs[aS - 1][bS - 1]) || 0,
+    z: (b.legs[bS - 1] && b.legs[bS - 1][aS - 1]) || 0
+  });
+  const isComplete = (a, z) => (a === 2 || z === 2) && a <= 2 && z <= 2 && (a + z === 2 || a + z === 3);
+  const statusFor = (a, z) => isComplete(a, z) ? 'Complete' : (a === 0 && z === 0 ? 'Pending' : 'In Progress');
+
+  let upNext = null;
+  rounds.forEach((round, rIdx) => round.forEach((m, mIdx) => {
+    if (upNext) return;
+    const lg = legsFor(m[0], m[1]);
+    if (statusFor(lg.a, lg.z) !== 'Complete') upNext = `${rIdx}-${mIdx}`;
+  }));
+
+  const badge = (txt, bg, fg, bd) => `<span style="display:inline-block;font-size:0.62rem;font-weight:700;letter-spacing:0.04em;padding:2px 8px;border-radius:20px;background:${bg};color:${fg};border:1px solid ${bd};white-space:nowrap">${txt}</span>`;
+
+  const rowsHtml = rounds.map((round, rIdx) => round.map((m, mIdx) => {
+    const [aS, bS, sS] = m;
+    const lg = legsFor(aS, bS);
+    const st = statusFor(lg.a, lg.z);
+    const isUp = upNext === `${rIdx}-${mIdx}` && st !== 'Complete';
+    let statusCell;
+    if (isUp) statusCell = badge('UP NEXT', 'rgba(92,187,92,0.18)', 'var(--green-accent)', 'var(--green-accent)');
+    else if (st === 'Complete') statusCell = badge(`COMPLETE ${lg.a}-${lg.z}`, 'rgba(45,106,45,0.25)', 'var(--green-accent)', 'var(--border)');
+    else if (st === 'In Progress') statusCell = badge(`IN PROGRESS ${lg.a}-${lg.z}`, 'rgba(204,0,0,0.12)', 'var(--red-light)', 'rgba(204,0,0,0.3)');
+    else statusCell = badge('PENDING', 'var(--card2)', 'var(--text-muted)', 'var(--border)');
+    return `<tr>
+      <td style="padding:5px 8px;text-align:center;font-family:'Share Tech Mono',monospace;font-weight:700;color:var(--text-muted);border-bottom:1px solid var(--border)">R${rIdx + 1}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border)">${playerNameForSlot(b, aS)} <span style="color:var(--text-muted)">vs</span> ${playerNameForSlot(b, bS)}</td>
+      <td style="padding:5px 8px;color:var(--text-muted);border-bottom:1px solid var(--border)">${playerNameForSlot(b, sS)} to score</td>
+      <td style="padding:5px 8px;text-align:center;border-bottom:1px solid var(--border)">${statusCell}</td>
+    </tr>`;
+  }).join('')).join('');
+
+  return shell(`
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:0.74rem">
+        <thead>
+          <tr style="background:var(--green-dark)">
+            <th style="padding:5px 8px;text-align:center;color:var(--text-muted);font-size:0.62rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Round</th>
+            <th style="padding:5px 8px;text-align:left;color:var(--text-muted);font-size:0.62rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Match</th>
+            <th style="padding:5px 8px;text-align:left;color:var(--text-muted);font-size:0.62rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Scoring</th>
+            <th style="padding:5px 8px;text-align:center;color:var(--text-muted);font-size:0.62rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Status</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`);
+}
+
 function renderBlockEntry() {
   const night = state.activeNight;
   const nightTypeName = night.night_type_id ? state.nightTypes.find(nt=>nt.id===night.night_type_id)?.name||'League Night' : 'League Night';
@@ -1805,137 +2013,115 @@ function renderBlockEntry() {
         + `<td style="padding:3px 4px;text-align:center;color:var(--text-muted);font-size:0.65rem">—</td>`;
     }
 
-    return `<tr style="${r%2===0?'':'background:rgba(45,106,45,0.05)'}">
-      <td style="padding:4px 6px;text-align:center;font-size:0.72rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;font-weight:700">${r+1}</td>
-      <td style="padding:4px 6px;min-width:${bIsTeam?'200px':'130px'}">${playerSelects}</td>
+    return `<tr>
+      <td style="text-align:center;font-size:0.72rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;font-weight:700">${r+1}.</td>
+      <td style="min-width:${bIsTeam?'200px':'150px'}">${playerSelects}</td>
       ${legCells}
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesPlayed : ''}</td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesWon : ''}</td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.78rem;color:var(--text-muted)">
-        ${r===0 ? `<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)">` : `<span style="color:var(--text-muted)">${b.bonus||0}</span>`}
+      <td style="text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesPlayed : ''}</td>
+      <td style="text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gamesWon : ''}</td>
+      <td style="text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.legsWon : ''}</td>
+      <td style="text-align:center;font-size:0.78rem;color:var(--text-muted)">${s ? s.gwPoints : ''}</td>
+      <td style="text-align:center;font-size:0.78rem;color:var(--text-muted)">
+        ${r===0 ? `<input type="number" min="0" value="${b.bonus||0}" style="width:36px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;padding:2px;font-size:0.72rem" onchange="updateBonus(${state.activeBlockIdx},this.value)" ${night.viewOnly?'disabled':''}>` : `<span style="color:var(--text-muted)">${b.bonus||0}</span>`}
       </td>
-      <td style="padding:4px 6px;text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
+      <td style="text-align:center;font-size:0.85rem;font-weight:700;color:var(--red)">${s ? s.totalPoints : ''}</td>
       ${accoladeCells}
-      <td style="padding:4px 6px;text-align:center;font-weight:700;color:var(--green-accent);font-size:0.82rem">${positions[r] || ''}</td>
+      <td style="text-align:center;font-weight:700;color:var(--green-accent);font-size:0.82rem">${positions[r] || ''}</td>
     </tr>`;
   }).join('');
 
   return `
-    <div style="padding:16px;display:flex;flex-direction:column;gap:16px;max-width:1400px;margin:0 auto">
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px;max-width:1400px;margin:0 auto">
 
-      <!-- Night Header Section - Enhanced Design -->
-      <div style="background:linear-gradient(135deg,var(--green-dark) 0%,#2A5A2A 100%);border-left:5px solid var(--red);border-radius:8px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,0.2)">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+      <!-- Setup card -->
+      <div class="card" style="padding:14px">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap">
           <div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:0.12em;color:white;font-weight:700;margin-bottom:4px">${nightTypeName}</div>
-            <div style="font-size:0.95rem;color:rgba(255,255,255,0.8)">${formatDate(night.date)}</div>
+            <h2 style="font-size:1.15rem;letter-spacing:0.08em;color:var(--text)">Night Setup (Block Sheet)</h2>
+            <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${nightTypeName} · ${formatDate(night.date)}</div>
+            <div style="font-size:0.74rem;color:var(--text-muted);margin-top:6px;max-width:640px;line-height:1.5">
+              ${night.viewOnly
+                ? '<strong>View mode:</strong> this night is locked. Contact an admin to make changes.'
+                : 'Choose block size (3–9), assign players to slots, then enter legs + accolades. Save Draft keeps progress without locking the night.'}
+            </div>
           </div>
-          <button class="btn btn-primary" style="font-size:0.75rem;padding:8px 14px;white-space:nowrap;border-radius:4px" onclick="backFromNightEntry()">← BACK TO NIGHTS</button>
-        </div>
-        
-        <div style="font-size:0.8rem;color:rgba(255,255,255,0.9);line-height:1.6;margin-bottom:12px;max-width:800px">
-          ${night.viewOnly 
-            ? '<strong>View Mode:</strong> This night is locked. Contact an administrator if you need to make changes.' 
-            : '<strong>Instructions:</strong> Select players for each slot, enter the legs won in the matrix, add accolades, then click SUBMIT NIGHT RESULTS below to finalize and lock this night.'}
-        </div>
-
-        ${!night.viewOnly ? `
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:8px;border-top:1px solid rgba(255,255,255,0.2)">
-            <span style="font-size:0.75rem;color:rgba(255,255,255,0.8);font-weight:700;text-transform:uppercase">Block Management:</span>
-            <button class="btn btn-ghost" style="font-size:0.75rem;padding:6px 12px;border:1px solid rgba(255,255,255,0.4);color:white;border-radius:4px;cursor:pointer" onclick="addBlock()">+ Add Block</button>
-            ${state.nightBlocks.length > 1 ? '<button class="btn btn-ghost" style="font-size:0.75rem;padding:6px 12px;border:1px solid rgba(255,255,255,0.4);color:#ffcccc;border-radius:4px;cursor:pointer" onclick="removeLastBlock()">- Remove Block</button>' : ''}
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px">
+            <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="backFromNightEntry()">← Back to Nights</button>
+            ${!night.viewOnly ? `
+              <label class="form-label" style="margin:0">Night date</label>
+              <input type="date" class="form-input" style="width:auto;font-size:0.72rem;padding:4px 6px" value="${night.date}" onchange="updateNightDate(this.value)">
+              <button class="btn btn-primary" style="font-size:0.72rem;padding:5px 10px" onclick="saveNightDraft()">Save Draft</button>
+              ${state.nightHasSavedDraft ? `
+                <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="restoreNightDraft()">Restore Draft</button>
+                <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px;color:var(--red)" onclick="clearNightDraft()">Clear Draft</button>
+              ` : ''}
+              <label class="form-label" style="margin:0 0 0 6px">Players per block</label>
+              <select class="form-input form-select" style="width:auto;font-size:0.72rem;padding:4px 22px 4px 6px" onchange="setBlockSize(${state.activeBlockIdx}, parseInt(this.value))">
+                ${[3,4,5,6,7,8,9].map(n => `<option value="${n}" ${N===n?'selected':''}>${n}</option>`).join('')}
+              </select>
+              <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="addBlock()">+ Block</button>
+              <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="clearActiveBlock()">Clear Block</button>
+              ${state.nightBlocks.length > 1 ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px;color:var(--red)" onclick="removeLastBlock()">- Remove Block</button>` : ''}
+            ` : ''}
           </div>
-        ` : ''}
-      </div>
+        </div>
 
-      <!-- Block tabs -->
-      <div class="tab-group">
-        ${state.nightBlocks.map((bl, i) => `
-          <div class="tab-btn ${i===state.activeBlockIdx?'active':''}" onclick="state.activeBlockIdx=${i};render()">${bl.label}</div>
-        `).join('')}
-      </div>
-
-      <!-- Block size selector -->
-      <div style="display:flex;align-items:center;gap:8px">
-        <label class="form-label" style="margin:0">Players in block:</label>
-        <div style="display:flex;gap:2px;flex-wrap:wrap">${N===3?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},3)">3</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},3)">3</button>`}${N===4?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},4)">4</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},4)">4</button>`}${N===5?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},5)">5</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},5)">5</button>`}${N===6?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},6)">6</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},6)">6</button>`}${N===7?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},7)">7</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},7)">7</button>`}${N===8?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},8)">8</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},8)">8</button>`}${N===9?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},9)">9</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},9)">9</button>`}${N===10?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},10)">10</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},10)">10</button>`}${N===11?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},11)">11</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},11)">11</button>`}${N===12?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},12)">12</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},12)">12</button>`}${N===13?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},13)">13</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},13)">13</button>`}${N===14?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},14)">14</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},14)">14</button>`}${N===15?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},15)">15</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},15)">15</button>`}${N===16?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},16)">16</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},16)">16</button>`}${N===17?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},17)">17</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},17)">17</button>`}${N===18?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},18)">18</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},18)">18</button>`}${N===19?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},19)">19</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},19)">19</button>`}${N===20?'<button class="btn btn-primary" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},20)">20</button>':`<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.68rem" onclick="setBlockSize(${state.activeBlockIdx},20)">20</button>`}</div>
+        <div class="tab-group" style="margin-top:12px">
+          ${state.nightBlocks.map((bl, i) => `
+            <div class="tab-btn ${i===state.activeBlockIdx?'active':''}" onclick="state.activeBlockIdx=${i};render()">${bl.label}</div>
+          `).join('')}
+        </div>
       </div>
 
       <!-- Block sheet table -->
       <div class="card" style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+        <table class="block-sheet">
           <thead>
-            <tr style="background:var(--green-dark)">
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--border)">Nr</th>
-              <th style="padding:5px 6px;text-align:left;color:var(--text);font-size:0.68rem;letter-spacing:0.05em;text-transform:uppercase;border-bottom:1px solid var(--border)">Player Name</th>
-              ${Array.from({length:N},(_,i)=>`<th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">${i+1}</th>`).join('')}
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GP</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GW</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Legs</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">GWPts</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border)">Bonus</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--red);font-size:0.68rem;font-weight:700;border-bottom:1px solid var(--border)">Total</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">180</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">171</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">H/C (#,val)</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);background:rgba(204,0,0,0.1)">L15</th>
-              <th style="padding:5px 6px;text-align:center;color:var(--green-accent);font-size:0.65rem;font-weight:700;border-bottom:1px solid var(--border)">Pos</th>
+            <tr>
+              <th rowspan="2">Nr.</th>
+              <th rowspan="2" style="text-align:left">Player Name</th>
+              <th colspan="${N}">Game Info</th>
+              <th rowspan="2">GP</th>
+              <th rowspan="2">GW</th>
+              <th rowspan="2">Legs</th>
+              <th rowspan="2">GWPts</th>
+              <th rowspan="2">Bonus</th>
+              <th rowspan="2" style="color:#ffc9c9">Total</th>
+              <th colspan="5" class="acc-band">Accolades</th>
+              <th rowspan="2" style="color:var(--green-accent)">Pos</th>
+            </tr>
+            <tr>
+              ${Array.from({length:N},(_,i)=>`<th>${i+1}</th>`).join('')}
+              <th class="acc-band">180</th>
+              <th class="acc-band">171</th>
+              <th class="acc-band">H/C</th>
+              <th class="acc-band">L15</th>
+              <th class="acc-band">9-Dart</th>
             </tr>
           </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
+          <tbody>${rows}</tbody>
+        </table>
       </div>
 
-      <!-- Fixtures Section -->
-      <div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em;color:var(--green-accent);margin-bottom:10px;font-weight:700;text-transform:uppercase">⚔️ Matchups — Round ${state.activeBlockIdx + 1}</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;font-size:0.75rem">
-          ${(() => {
-            const b = state.nightBlocks[state.activeBlockIdx];
-            if (!b) return '<div style="color:var(--text-muted);grid-column:1/-1">Loading...</div>';
-            const fixtures = [];
-            for (let r = 0; r < b.size; r++) {
-              for (let c = r + 1; c < b.size; c++) {
-                const rPlayer = b.slots[r] ? state.players.find(p => p.id === b.slots[r]) : null;
-                const cPlayer = b.slots[c] ? state.players.find(p => p.id === b.slots[c]) : null;
-                if (rPlayer && cPlayer) {
-                  const legR = b.legs[r][c] || 0;
-                  const legC = b.legs[c][r] || 0;
-                  const isComplete = legR > 0 && legC > 0;
-                  const result = legR > legC ? `${rPlayer.first_name} ✓` : legC > legR ? `${cPlayer.first_name} ✓` : 'vs';
-                  fixtures.push(`<div style="padding:10px;background:${isComplete?'rgba(45,106,45,0.15)':'var(--card2)'};border:1px solid ${isComplete?'var(--green-accent)':'var(--border)'};border-radius:5px;text-align:center;font-weight:${isComplete?'700':'600'}">${rPlayer.first_name}<br><span style="color:${isComplete?'var(--green)':'var(--text-muted)'};font-size:0.85em;margin:2px 0;display:block">${legR}-${legC}</span>${cPlayer.first_name}</div>`);
-                }
-              }
-            }
-            return fixtures.length ? fixtures.join('') : '<div style="color:var(--text-muted);grid-column:1/-1;text-align:center;padding:20px">Assign players to slots to see matchups</div>';
-          })()}
-        </div>
+      <!-- Notes -->
+      <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.6">
+        Enter legs in the matrix (row player vs column player). Black diagonal cells are N/A.
+        Total = Legs Won + (Games Won &times; 2) + Block Bonus. Accolades are added to the Season Log only when you Submit.
       </div>
 
-      <!-- Instructions Card -->
-      <div style="background:rgba(45,106,45,0.08);border-left:4px solid var(--green-accent);border-radius:6px;padding:14px;border:1px solid var(--border)">
-        <div style="font-weight:700;color:var(--green-accent);font-size:0.85rem;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">📋 How to Enter Results:</div>
-        <ul style="font-size:0.78rem;color:var(--text);line-height:1.6;margin:0;padding-left:20px;list-style:none">
-          <li style="margin-bottom:6px"><strong>1.</strong> Select a player from the dropdown for each slot</li>
-          <li style="margin-bottom:6px"><strong>2.</strong> Enter the legs won in each cell (0-3)</li>
-          <li style="margin-bottom:6px"><strong>3.</strong> Diagonal cells are disabled (no self-matches)</li>
-          <li style="margin-bottom:6px"><strong>4.</strong> Add accolades: 180s, 171s, High Closes, L15s, 9-darters</li>
-          <li style="margin-bottom:0px"><strong>5.</strong> When complete, click <strong>SUBMIT NIGHT RESULTS</strong> below</li>
-        </ul>
-      </div>
+      ${renderRoundsLookup(state.activeBlockIdx)}
 
-      <!-- Submit Button Section - Full Width & Prominent -->
-      <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
-        <button onclick="submitNight()" style="width:100%;padding:16px;font-size:0.95rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;background:linear-gradient(135deg,#CC0000 0%,#FF3333 100%);border:none;border-radius:6px;color:white;cursor:pointer;transition:all 0.3s;box-shadow:0 4px 12px rgba(204,0,0,0.3);display:flex;align-items:center;justify-content:center;gap:8px">
-          🔒 SUBMIT NIGHT RESULTS
-        </button>
-        <div style="text-align:center;font-size:0.75rem;color:var(--text-muted);line-height:1.5">
-          This locks the night, calculates totals, and pushes results to the Season Log. <strong>This action cannot be undone.</strong> Verify all data before submitting.
+      <!-- Submit -->
+      ${!night.viewOnly ? `
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+          <button onclick="submitNight()" style="width:100%;padding:14px;font-size:0.9rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;background:linear-gradient(135deg,#CC0000 0%,#FF3333 100%);border:none;border-radius:6px;color:white;cursor:pointer;box-shadow:0 4px 12px rgba(204,0,0,0.3)">
+            🔒 Submit Night Results
+          </button>
+          <div style="text-align:center;font-size:0.72rem;color:var(--text-muted);line-height:1.5">
+            Submit is the final trigger that pushes the night totals to History and the Season Log. Draft Save is for recovery only.
+          </div>
         </div>
-      </div>
+      ` : ''}
 
     </div>`;
 }
