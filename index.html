@@ -1702,22 +1702,30 @@ function renderBlockEntry() {
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:8px">
 
-      <!-- Night Header -->
-      <div class="card" style="padding:8px 12px;background:var(--green-dark);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div>
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em">${nightTypeName} — ${formatDate(night.date)}</div>
-          <div style="font-size:0.68rem;color:var(--text-muted)">Enter legs won per match. Calculations update automatically.</div>
+      <!-- Night Header - Prominent -->
+      <div class="card" style="padding:12px;background:linear-gradient(135deg,var(--green-dark),#2A5A2A);border-left:4px solid var(--red);display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:0.1em;color:white">${nightTypeName}</div>
+            <div style="font-size:0.9rem;color:var(--text-muted);margin-top:2px">${formatDate(night.date)}</div>
+          </div>
+          <button class="btn btn-primary" style="font-size:0.72rem;padding:6px 12px" onclick="backFromNightEntry()">← BACK</button>
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <button class="btn btn-primary" style="font-size:0.72rem" onclick="backFromNightEntry()">← Back</button>
-          ${night.viewOnly ? `
-            <span style="font-size:0.7rem;color:var(--text-muted);padding:2px 8px;border:1px solid var(--border);border-radius:4px">View Only</span>
-            ${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight.viewOnly=false;render()">✏️ Edit</button>' : ''}
-          ` : `
-            <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
-            <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
-          `}
-          ${!night.viewOnly ? (night.id ? '<button class="btn btn-red" style="font-size:0.72rem" onclick="resubmitNight()">Re-Submit Night</button>' : '<button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>') : ''}
+        
+        <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.4">
+          ${night.viewOnly 
+            ? 'View mode: Locked night results. Contact admin to edit.' 
+            : 'Assign players to slots, enter legs won in the matrix, add accolades, then SUBMIT NIGHT RESULTS'}
+        </div>
+
+        ${!night.viewOnly ? `
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <span style="font-size:0.68rem;color:var(--text-muted);font-weight:700">BLOCK CONTROLS:</span>
+            <button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 8px" onclick="addBlock()">+ Add Block</button>
+            ${state.nightBlocks.length > 1 ? '<button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 8px;color:var(--red)" onclick="removeLastBlock()">Remove Block</button>' : ''}
+          </div>
+        ` : ''}
+      </div>
         </div>
       </div>
 
@@ -1759,10 +1767,41 @@ function renderBlockEntry() {
         </table>
       </div>
 
-      <!-- Notes -->
-      <div style="font-size:0.68rem;color:var(--text-muted);padding:4px 2px">
-        Enter legs won in the matrix. Diagonal cells = no match. H/C: enter count then the value (e.g. 1 × 120). 170 automatically records as Big Fish. Submit locks the night and pushes to Season Log.
+      <!-- Fixtures/Rounds -->
+      <div class="card" style="padding:10px 12px;background:rgba(45,106,45,0.1);border:1px solid var(--green-accent)">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:0.82rem;letter-spacing:0.1em;color:var(--green-accent);margin-bottom:8px">FIXTURES — ROUND ${state.activeBlockIdx + 1}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;font-size:0.72rem">
+          ${(() => {
+            const b = state.nightBlocks[state.activeBlockIdx];
+            if (!b) return '<div style="color:var(--text-muted)">Loading...</div>';
+            const fixtures = [];
+            for (let r = 0; r < b.size; r++) {
+              for (let c = r + 1; c < b.size; c++) {
+                const rPlayer = b.slots[r] ? state.players.find(p => p.id === b.slots[r]) : null;
+                const cPlayer = b.slots[c] ? state.players.find(p => p.id === b.slots[c]) : null;
+                if (rPlayer && cPlayer) {
+                  const legR = b.legs[r][c] || 0;
+                  const legC = b.legs[c][r] || 0;
+                  const result = legR > legC ? `${rPlayer.first_name} ✓` : legC > legR ? `${cPlayer.first_name} ✓` : 'vs';
+                  fixtures.push(`<div style="padding:6px;background:var(--card);border:1px solid var(--border);border-radius:4px;text-align:center">${rPlayer.first_name} ${legR}-${legC} ${cPlayer.first_name}</div>`);
+                }
+              }
+            }
+            return fixtures.length ? fixtures.join('') : '<div style="color:var(--text-muted);grid-column:1/-1">Assign players to see fixtures</div>';
+          })()}
+        </div>
       </div>
+
+      <!-- Notes -->
+      <div style="font-size:0.68rem;color:var(--text-muted);padding:8px 12px;background:rgba(45,106,45,0.05);border-radius:4px;margin-bottom:12px">
+        <strong>Instructions:</strong> Enter legs won in the matrix. Diagonal cells = no match. H/C: enter count then the value (e.g. 1 × 120). 170 automatically records as Big Fish.
+      </div>
+
+      <!-- Submit Button - Full Width & Prominent -->
+      <button class="btn btn-red" onclick="submitNight()" style="width:100%;padding:12px 16px;font-size:0.85rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;background:linear-gradient(135deg,#CC0000,#FF3333);border:none;border-radius:6px;color:white;cursor:pointer;transition:all 0.3s" onmouseover="this.style.background='linear-gradient(135deg,#AA0000,#DD2222)'" onmouseout="this.style.background='linear-gradient(135deg,#CC0000,#FF3333)'">
+        🔒 SUBMIT NIGHT RESULTS
+      </button>
+      <div style="font-size:0.65rem;color:var(--text-muted);text-align:center;margin-top:6px">Submit is the final trigger that locks the night and pushes totals to Season Log.</div>
     </div>`;
 }
 
