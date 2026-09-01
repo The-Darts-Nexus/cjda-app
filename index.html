@@ -498,13 +498,106 @@ async function saveNight() {
   openNightEntry(data.id);
 }
 
-function openNightEntry(nightId) {
+async function openNightEntry(nightId) {
   const night = state.nights.find(n => n.id === nightId);
   if (!night) return;
+  state.loading = true; render();
+  
+  try {
+    // Load existing blocks from database for this night
+    const { data: blocks } = await sb.from('blocks').select('*').eq('night_id', nightId).order('block_label');
+    
+    if (blocks && blocks.length > 0) {
+      // Blocks exist - load them for editing
+      const { data: bps } = await sb.from('block_players').select('*').in('block_id', blocks.map(b => b.id));
+      const { data: results } = await sb.from('results').select('*').eq('night_id', nightId);
+      const { data: accs } = await sb.from('accolades').select('*').eq('night_id', nightId);
+      
+      state.nightBlocks = blocks.map(block => {
+        const blockBps = (bps || []).filter(bp => bp.block_id === block.id).sort((a,b) => a.slot_index - b.slot_index);
+        const size = block.size || blockBps.length || 4;
+        const fmt = block.format || getNightFormat(night.night_type_id);
+        const pps = getPlayersPerSlot(fmt);
+        
+        // Reconstruct slots array
+        const slots = Array(size).fill(null).map(() => Array(pps).fill(null));
+        blockBps.forEach(bp => {
+          if (bp.slot_index < size) {
+            if (!Array.isArray(slots[bp.slot_index])) slots[bp.slot_index] = Array(pps).fill(null);
+            slots[bp.slot_index][bp.sub_slot || 0] = bp.player_id;
+          }
+        });
+        
+        // Reconstruct legs matrix
+        const legs = Array.from({length: size}, () => Array(size).fill(0));
+        (results || []).filter(r => r.block_id === block.id).forEach(r => {
+          const homeSlot = slots.findIndex(s => Array.isArray(s) ? s.includes(r.home_player_id) : s === r.home_player_id);
+          const awaySlot = slots.findIndex(s => Array.isArray(s) ? s.includes(r.away_player_id) : s === r.away_player_id);
+          if (homeSlot >= 0 && awaySlot >= 0) {
+            legs[homeSlot][awaySlot] = r.home_legs;
+            legs[awaySlot][homeSlot] = r.away_legs;
+          }
+        });
+        
+        // Reconstruct accolades
+        const accoladesArr = Array.from({length: size}, () => ({ '180': 0, '171': 0, hc: 0, hc_value: '', l15: 0, l15_value: '', records: [] }));
+        (accs || []).forEach(a => {
+          const slotIdx = slots.findIndex(s => Array.isArray(s) ? s.includes(a.player_id) : s === a.player_id);
+          if (slotIdx < 0) return;
+          
+          if (a.accolade_type === '180') accoladesArr[slotIdx]['180']++;
+          else if (a.accolade_type === '171') accoladesArr[slotIdx]['171']++;
+          else if (a.accolade_type === 'high_close' || a.accolade_type === '170_close') {
+            accoladesArr[slotIdx].hc++;
+            accoladesArr[slotIdx].hc_value = a.value;
+            if (!accoladesArr[slotIdx].records) accoladesArr[slotIdx].records = [];
+            accoladesArr[slotIdx].records.push({ type: 'hc', playerId: a.player_id, value: a.value });
+          } else if (a.accolade_type === '15_dart') {
+            accoladesArr[slotIdx].l15++;
+            accoladesArr[slotIdx].l15_value = String(a.value || 14);
+          }
+        });
+        
+        return {
+          label: block.block_label,
+          size,
+          format: fmt,
+          slots,
+          legs,
+          accolades: accoladesArr,
+          bonus: block.bonus || 0,
+          id: block.id
+        };
+      });
+      state.activeBlockIdx = 0;
+    } else {
+      // No existing blocks - start fresh with one empty block
+      state.nightBlocks = [];
+      addBlock();
+    }
+  } catch(e) {
+    console.error('Error loading night blocks:', e);
+    // Fall back to creating empty block
+    state.nightBlocks = [];
+    addBlock();
+  }
+  
   state.activeNight = night;
-  state.activeBlockIdx = 0;
+  state.loading = false; render();
+}
+
+function backFromNightEntry() {
+  // Check if there's unsaved data
+  const hasChanges = state.nightBlocks.some(b => b.slots.some(s => s));
+  
+  if (hasChanges) {
+    const confirmed = confirm('You have unsaved changes. Leave without saving?\n\nYour data will be lost!');
+    if (!confirmed) return;
+  }
+  
+  state.activeNight = null;
   state.nightBlocks = [];
-  addBlock(); // start with one empty block
+  state.competitionNightId = null;
   render();
 }
 
@@ -651,6 +744,14 @@ async function submitNight() {
   const hasData = state.nightBlocks.some(b => b.slots.some(s => s));
   if (!hasData) { showToast('Please assign players to blocks first', 'error'); return; }
 
+  // Count blocks and players
+  const blockCount = state.nightBlocks.length;
+  const playerCount = state.nightBlocks.reduce((sum, b) => sum + b.slots.filter(s => s).length, 0);
+
+  // Confirmation dialog
+  const confirmed = confirm(`Submit night with ${blockCount} block(s) and ${playerCount} player(s)?\n\nThis will lock the night and save all data.`);
+  if (!confirmed) return;
+
   state.loading = true; render();
 
   try {
@@ -727,7 +828,7 @@ async function submitNight() {
     // Lock the night
     await sb.from('nights').update({ status: 'locked' }).eq('id', state.activeNight.id);
 
-    showToast('Night submitted successfully!');
+    showToast('Night submitted successfully!', 'success');
     state.activeNight = null;
     state.nightBlocks = [];
     await loadAllData();
@@ -1608,15 +1709,15 @@ function renderBlockEntry() {
           <div style="font-size:0.68rem;color:var(--text-muted)">Enter legs won per match. Calculations update automatically.</div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <button class="btn btn-primary" style="font-size:0.72rem" onclick="state.activeNight=null;state.nightBlocks=[];state.competitionNightId=null;render()">← Back</button>
+          <button class="btn btn-primary" style="font-size:0.72rem" onclick="backFromNightEntry()">← Back</button>
           ${night.viewOnly ? `
             <span style="font-size:0.7rem;color:var(--text-muted);padding:2px 8px;border:1px solid var(--border);border-radius:4px">View Only</span>
             ${isAdmin() ? '<button class="btn btn-ghost" style="font-size:0.72rem" onclick="state.activeNight.viewOnly=false;render()">✏️ Edit</button>' : ''}
           ` : `
             <button class="btn btn-ghost" style="font-size:0.72rem" onclick="removeLastBlock()">Remove Block</button>
             <button class="btn btn-ghost" style="font-size:0.72rem" onclick="addBlock()">+ Block</button>
-            ${night.id ? '<button class="btn btn-red" style="font-size:0.72rem" onclick="resubmitNight()">Re-Submit Night</button>' : '<button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>'}
           `}
+          ${!night.viewOnly ? (night.id ? '<button class="btn btn-red" style="font-size:0.72rem" onclick="resubmitNight()">Re-Submit Night</button>' : '<button class="btn btn-red" style="font-size:0.72rem" onclick="submitNight()">Submit Night</button>') : ''}
         </div>
       </div>
 
