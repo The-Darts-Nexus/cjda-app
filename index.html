@@ -1700,33 +1700,31 @@ function renderBlockEntry() {
   }).join('');
 
   return `
-    <div style="padding:10px;display:flex;flex-direction:column;gap:8px">
+    <div style="padding:16px;display:flex;flex-direction:column;gap:16px;max-width:1400px;margin:0 auto">
 
-      <!-- Night Header - Prominent -->
-      <div class="card" style="padding:12px;background:linear-gradient(135deg,var(--green-dark),#2A5A2A);border-left:4px solid var(--red);display:flex;flex-direction:column;gap:10px">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <!-- Night Header Section - Enhanced Design -->
+      <div style="background:linear-gradient(135deg,var(--green-dark) 0%,#2A5A2A 100%);border-left:5px solid var(--red);border-radius:8px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,0.2)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px">
           <div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:0.1em;color:white">${nightTypeName}</div>
-            <div style="font-size:0.9rem;color:var(--text-muted);margin-top:2px">${formatDate(night.date)}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:0.12em;color:white;font-weight:700;margin-bottom:4px">${nightTypeName}</div>
+            <div style="font-size:0.95rem;color:rgba(255,255,255,0.8)">${formatDate(night.date)}</div>
           </div>
-          <button class="btn btn-primary" style="font-size:0.72rem;padding:6px 12px" onclick="backFromNightEntry()">← BACK</button>
+          <button class="btn btn-primary" style="font-size:0.75rem;padding:8px 14px;white-space:nowrap;border-radius:4px" onclick="backFromNightEntry()">← BACK TO NIGHTS</button>
         </div>
         
-        <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.4">
+        <div style="font-size:0.8rem;color:rgba(255,255,255,0.9);line-height:1.6;margin-bottom:12px;max-width:800px">
           ${night.viewOnly 
-            ? 'View mode: Locked night results. Contact admin to edit.' 
-            : 'Assign players to slots, enter legs won in the matrix, add accolades, then SUBMIT NIGHT RESULTS'}
+            ? '<strong>View Mode:</strong> This night is locked. Contact an administrator if you need to make changes.' 
+            : '<strong>Instructions:</strong> Select players for each slot, enter the legs won in the matrix, add accolades, then click SUBMIT NIGHT RESULTS below to finalize and lock this night.'}
         </div>
 
         ${!night.viewOnly ? `
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <span style="font-size:0.68rem;color:var(--text-muted);font-weight:700">BLOCK CONTROLS:</span>
-            <button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 8px" onclick="addBlock()">+ Add Block</button>
-            ${state.nightBlocks.length > 1 ? '<button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 8px;color:var(--red)" onclick="removeLastBlock()">Remove Block</button>' : ''}
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:8px;border-top:1px solid rgba(255,255,255,0.2)">
+            <span style="font-size:0.75rem;color:rgba(255,255,255,0.8);font-weight:700;text-transform:uppercase">Block Management:</span>
+            <button class="btn btn-ghost" style="font-size:0.75rem;padding:6px 12px;border:1px solid rgba(255,255,255,0.4);color:white;border-radius:4px;cursor:pointer" onclick="addBlock()">+ Add Block</button>
+            ${state.nightBlocks.length > 1 ? '<button class="btn btn-ghost" style="font-size:0.75rem;padding:6px 12px;border:1px solid rgba(255,255,255,0.4);color:#ffcccc;border-radius:4px;cursor:pointer" onclick="removeLastBlock()">- Remove Block</button>' : ''}
           </div>
         ` : ''}
-      </div>
-        </div>
       </div>
 
       <!-- Block tabs -->
@@ -1763,17 +1761,18 @@ function renderBlockEntry() {
               <th style="padding:5px 6px;text-align:center;color:var(--green-accent);font-size:0.65rem;font-weight:700;border-bottom:1px solid var(--border)">Pos</th>
             </tr>
           </thead>
-          <tbody>${rows}</tbody>
-        </table>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
       </div>
 
-      <!-- Fixtures/Rounds -->
-      <div class="card" style="padding:10px 12px;background:rgba(45,106,45,0.1);border:1px solid var(--green-accent)">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:0.82rem;letter-spacing:0.1em;color:var(--green-accent);margin-bottom:8px">FIXTURES — ROUND ${state.activeBlockIdx + 1}</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;font-size:0.72rem">
+      <!-- Fixtures Section -->
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em;color:var(--green-accent);margin-bottom:10px;font-weight:700;text-transform:uppercase">⚔️ Matchups — Round ${state.activeBlockIdx + 1}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;font-size:0.75rem">
           ${(() => {
             const b = state.nightBlocks[state.activeBlockIdx];
-            if (!b) return '<div style="color:var(--text-muted)">Loading...</div>';
+            if (!b) return '<div style="color:var(--text-muted);grid-column:1/-1">Loading...</div>';
             const fixtures = [];
             for (let r = 0; r < b.size; r++) {
               for (let c = r + 1; c < b.size; c++) {
@@ -1782,26 +1781,39 @@ function renderBlockEntry() {
                 if (rPlayer && cPlayer) {
                   const legR = b.legs[r][c] || 0;
                   const legC = b.legs[c][r] || 0;
+                  const isComplete = legR > 0 && legC > 0;
                   const result = legR > legC ? `${rPlayer.first_name} ✓` : legC > legR ? `${cPlayer.first_name} ✓` : 'vs';
-                  fixtures.push(`<div style="padding:6px;background:var(--card);border:1px solid var(--border);border-radius:4px;text-align:center">${rPlayer.first_name} ${legR}-${legC} ${cPlayer.first_name}</div>`);
+                  fixtures.push(`<div style="padding:10px;background:${isComplete?'rgba(45,106,45,0.15)':'var(--card2)'};border:1px solid ${isComplete?'var(--green-accent)':'var(--border)'};border-radius:5px;text-align:center;font-weight:${isComplete?'700':'600'}">${rPlayer.first_name}<br><span style="color:${isComplete?'var(--green)':'var(--text-muted)'};font-size:0.85em;margin:2px 0;display:block">${legR}-${legC}</span>${cPlayer.first_name}</div>`);
                 }
               }
             }
-            return fixtures.length ? fixtures.join('') : '<div style="color:var(--text-muted);grid-column:1/-1">Assign players to see fixtures</div>';
+            return fixtures.length ? fixtures.join('') : '<div style="color:var(--text-muted);grid-column:1/-1;text-align:center;padding:20px">Assign players to slots to see matchups</div>';
           })()}
         </div>
       </div>
 
-      <!-- Notes -->
-      <div style="font-size:0.68rem;color:var(--text-muted);padding:8px 12px;background:rgba(45,106,45,0.05);border-radius:4px;margin-bottom:12px">
-        <strong>Instructions:</strong> Enter legs won in the matrix. Diagonal cells = no match. H/C: enter count then the value (e.g. 1 × 120). 170 automatically records as Big Fish.
+      <!-- Instructions Card -->
+      <div style="background:rgba(45,106,45,0.08);border-left:4px solid var(--green-accent);border-radius:6px;padding:14px;border:1px solid var(--border)">
+        <div style="font-weight:700;color:var(--green-accent);font-size:0.85rem;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">📋 How to Enter Results:</div>
+        <ul style="font-size:0.78rem;color:var(--text);line-height:1.6;margin:0;padding-left:20px;list-style:none">
+          <li style="margin-bottom:6px"><strong>1.</strong> Select a player from the dropdown for each slot</li>
+          <li style="margin-bottom:6px"><strong>2.</strong> Enter the legs won in each cell (0-3)</li>
+          <li style="margin-bottom:6px"><strong>3.</strong> Diagonal cells are disabled (no self-matches)</li>
+          <li style="margin-bottom:6px"><strong>4.</strong> Add accolades: 180s, 171s, High Closes, L15s, 9-darters</li>
+          <li style="margin-bottom:0px"><strong>5.</strong> When complete, click <strong>SUBMIT NIGHT RESULTS</strong> below</li>
+        </ul>
       </div>
 
-      <!-- Submit Button - Full Width & Prominent -->
-      <button class="btn btn-red" onclick="submitNight()" style="width:100%;padding:12px 16px;font-size:0.85rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;background:linear-gradient(135deg,#CC0000,#FF3333);border:none;border-radius:6px;color:white;cursor:pointer;transition:all 0.3s" onmouseover="this.style.background='linear-gradient(135deg,#AA0000,#DD2222)'" onmouseout="this.style.background='linear-gradient(135deg,#CC0000,#FF3333)'">
-        🔒 SUBMIT NIGHT RESULTS
-      </button>
-      <div style="font-size:0.65rem;color:var(--text-muted);text-align:center;margin-top:6px">Submit is the final trigger that locks the night and pushes totals to Season Log.</div>
+      <!-- Submit Button Section - Full Width & Prominent -->
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
+        <button onclick="submitNight()" style="width:100%;padding:16px;font-size:0.95rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;background:linear-gradient(135deg,#CC0000 0%,#FF3333 100%);border:none;border-radius:6px;color:white;cursor:pointer;transition:all 0.3s;box-shadow:0 4px 12px rgba(204,0,0,0.3);display:flex;align-items:center;justify-content:center;gap:8px">
+          🔒 SUBMIT NIGHT RESULTS
+        </button>
+        <div style="text-align:center;font-size:0.75rem;color:var(--text-muted);line-height:1.5">
+          This locks the night, calculates totals, and pushes results to the Season Log. <strong>This action cannot be undone.</strong> Verify all data before submitting.
+        </div>
+      </div>
+
     </div>`;
 }
 
