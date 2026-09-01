@@ -416,6 +416,7 @@ function nightRegisteredIds() {
 
 async function toggleNightAttendance(playerId, present) {
   if (!state.activeNight || !isAdmin()) return;
+  if (state.assistant) state.assistant._searchFocused = false;
   const nightId = state.activeNight.id;
   if (present) {
     const { error } = await sb.from('night_attendance').insert({ space_id: SPACE_ID, night_id: nightId, player_id: playerId });
@@ -430,6 +431,7 @@ async function toggleNightAttendance(playerId, present) {
 
 async function setNightAttendanceBulk(playerIds, present) {
   if (!state.activeNight || !isAdmin() || !playerIds.length) return;
+  if (state.assistant) state.assistant._searchFocused = false;
   const nightId = state.activeNight.id;
   if (present) {
     const rows = playerIds.map(pid => ({ space_id: SPACE_ID, night_id: nightId, player_id: pid }));
@@ -2043,7 +2045,7 @@ function renderScheduleAssistant() {
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:0.74rem;color:var(--text-muted)">${n} registered</span>
-          <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 12px" onclick="state.assistant.open=true;render()">${locked ? 'View' : 'Open'}</button>
+          <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 12px" onclick="state.assistant.open=true;state.assistant._scroll=0;state.assistant._searchFocused=false;render()">${locked ? 'View' : 'Open'}</button>
         </div>
       </div>`;
   }
@@ -2097,9 +2099,9 @@ function renderScheduleAssistant() {
               <button class="btn btn-ghost" style="font-size:0.66rem;padding:3px 8px" onclick='setNightAttendanceBulk(${shownIdsJson}, false)'>Clear all shown</button>
             ` : ''}
           </div>
-          <input type="text" class="form-input" placeholder="Search players…" value="${pickerAttr(a.search || '')}"
-            oninput="state.assistant.search=this.value;render()" style="font-size:0.76rem;padding:5px 8px;margin-bottom:6px">
-          <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--card2)">
+          <input type="text" id="assistant-search" class="form-input" placeholder="Search players…" value="${pickerAttr(a.search || '')}"
+            oninput="state.assistant._searchFocused=true;state.assistant.search=this.value;render()" style="font-size:0.76rem;padding:5px 8px;margin-bottom:6px">
+          <div id="assistant-scroll" onscroll="if(state.assistant)state.assistant._scroll=this.scrollTop" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--card2)">
             ${listRows || '<div style="padding:10px;font-size:0.75rem;color:var(--text-muted)">No players match.</div>'}
           </div>
         </div>
@@ -2786,6 +2788,19 @@ function render() {
     }
   }
   root.innerHTML = renderHeader() + `<div style="max-width:1200px;margin:0 auto">${pageContent}</div>` + renderModal();
+  restoreAssistantUI();
+}
+
+// Keep the Schedule Assistant register usable across full re-renders (scroll + search focus)
+function restoreAssistantUI() {
+  const a = state.assistant;
+  if (!a || !a.open) return;
+  const box = document.getElementById('assistant-scroll');
+  if (box && a._scroll != null) box.scrollTop = a._scroll;
+  if (a._searchFocused) {
+    const s = document.getElementById('assistant-search');
+    if (s) { s.focus(); const n = s.value.length; try { s.setSelectionRange(n, n); } catch(e) {} }
+  }
 }
 
 // ═══════════════════════════════════════════════
