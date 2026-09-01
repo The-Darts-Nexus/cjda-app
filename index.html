@@ -643,6 +643,103 @@ function setBlockSlot(blockIdx, slotIdx, subSlot, playerId) {
   render();
 }
 
+// ── Searchable player picker (block entry) ─────────────────────────
+function pickerAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function closeAllPlayerDropdowns(restore) {
+  document.querySelectorAll('.player-search-dropdown').forEach(el => { el.style.display = 'none'; });
+  if (restore) {
+    document.querySelectorAll('.player-search-input').forEach(inp => {
+      inp.value = inp.getAttribute('data-selected-name') || '';
+    });
+  }
+}
+
+function openPlayerDropdown(uid) {
+  const input = document.getElementById(uid);
+  const dropdown = document.getElementById(uid + '-dropdown');
+  if (!input || !dropdown || input.disabled) return;
+
+  document.querySelectorAll('.player-search-dropdown').forEach(el => {
+    if (el !== dropdown) el.style.display = 'none';
+  });
+  dropdown.querySelectorAll('[data-player-option]').forEach(el => { el.style.display = 'block'; });
+  const nm = dropdown.querySelector('[data-player-nomatch]');
+  if (nm) nm.style.display = 'none';
+
+  dropdown.style.display = 'block';
+  input.focus();
+  input.select();
+}
+
+function filterPlayerDropdown(uid) {
+  const input = document.getElementById(uid);
+  const dropdown = document.getElementById(uid + '-dropdown');
+  if (!input || !dropdown) return;
+
+  document.querySelectorAll('.player-search-dropdown').forEach(el => {
+    if (el !== dropdown) el.style.display = 'none';
+  });
+
+  const term = input.value.trim().toLowerCase();
+  let visible = 0;
+  dropdown.querySelectorAll('[data-player-option]').forEach(el => {
+    const hit = (el.getAttribute('data-name') || '').includes(term);
+    el.style.display = hit ? 'block' : 'none';
+    if (hit) visible++;
+  });
+  const nm = dropdown.querySelector('[data-player-nomatch]');
+  if (nm) nm.style.display = visible ? 'none' : 'block';
+  dropdown.style.display = 'block';
+}
+
+function playerDropdownKey(uid, event) {
+  if (event.key === 'Escape') {
+    closeAllPlayerDropdowns(true);
+    const input = document.getElementById(uid);
+    if (input) input.blur();
+  } else if (event.key === 'Enter') {
+    const dropdown = document.getElementById(uid + '-dropdown');
+    if (!dropdown || dropdown.style.display === 'none') return;
+    event.preventDefault();
+    const first = Array.from(dropdown.querySelectorAll('[data-player-option]'))
+      .find(el => el.style.display !== 'none' && el.getAttribute('data-id'));
+    if (first) applyPlayerSelection(uid, first);
+  }
+}
+
+function applyPlayerSelection(uid, optionEl) {
+  const dropdown = document.getElementById(uid + '-dropdown');
+  const meta = dropdown ? JSON.parse(dropdown.getAttribute('data-picker-meta') || '{}') : {};
+  selectPlayer(uid, optionEl.getAttribute('data-id'), optionEl.getAttribute('data-fullname'), meta.b, meta.r, meta.s);
+}
+
+function selectPlayer(uid, playerId, playerName, blockIdx, slotIdx, subSlot) {
+  const input = document.getElementById(uid);
+  if (input) {
+    input.value = playerName || '';
+    input.setAttribute('data-selected-name', playerName || '');
+  }
+  const dropdown = document.getElementById(uid + '-dropdown');
+  if (dropdown) dropdown.style.display = 'none';
+  setBlockSlot(blockIdx, slotIdx, subSlot, playerId || null);
+}
+
+// Delegated: pick an option, or dismiss open pickers on an outside click
+document.addEventListener('click', (e) => {
+  const opt = e.target.closest('[data-player-option]');
+  if (opt) {
+    const dropdown = opt.closest('.player-search-dropdown');
+    if (dropdown) applyPlayerSelection(dropdown.id.replace(/-dropdown$/, ''), opt);
+    return;
+  }
+  if (e.target.closest('.player-search-wrap')) return;
+  closeAllPlayerDropdowns(true);
+});
 
 function legColor(val) {
   const v = parseInt(val) || 0;
@@ -1610,16 +1707,42 @@ function renderBlockEntry() {
     const acc = b.accolades[r] || { records: [] };
     const records = acc.records || [];
 
-    // Player selection cell
+    // Player selection cell — searchable dropdown
     const playerSelects = Array.from({length: bPps}, (_, si) => {
       const pid = teamSlot[si] || '';
-      const label = bPps === 1 ? '(empty)' : si === 0 ? 'Player 1' : si === 1 ? 'Player 2' : 'Player 3';
-      return `<div style="margin-bottom:${si<bPps-1?'2px':'0'}">
-        <select style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:2px 4px;font-size:0.72rem"
-          onchange="setBlockSlot(${state.activeBlockIdx},${r},${si},this.value)" ${night.viewOnly?'disabled':''}>
-          <option value="">${label}</option>
-          ${state.players.map(p => `<option value="${p.id}" ${pid===p.id?'selected':''}>${p.first_name} ${p.last_name}</option>`).join('')}
-        </select>
+      const label = bPps === 1 ? 'Search player…' : `Player ${si + 1}`;
+      const selectedPlayer = pid ? state.players.find(p => p.id === pid) : null;
+      const displayName = selectedPlayer ? `${selectedPlayer.first_name} ${selectedPlayer.last_name}` : '';
+      const uid = `player-search-${state.activeBlockIdx}-${r}-${si}`;
+      const dn = pickerAttr(displayName);
+
+      const options = state.players.map(p => {
+        const full = `${p.first_name} ${p.last_name}`;
+        return `<div data-player-option data-id="${p.id}" data-fullname="${pickerAttr(full)}" data-name="${pickerAttr(full.toLowerCase())}"
+          style="padding:6px 8px;cursor:pointer;font-size:0.72rem;color:var(--text);border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+          onmouseover="this.style.background='var(--green-dark)';this.style.color='#fff'"
+          onmouseout="this.style.background='transparent';this.style.color='var(--text)'">${pickerAttr(full)}</div>`;
+      }).join('');
+
+      const clearRow = pid
+        ? `<div data-player-option data-id="" data-fullname="" data-name=""
+            style="padding:6px 8px;cursor:pointer;font-size:0.72rem;color:var(--text-muted);border-bottom:1px solid var(--border);font-style:italic"
+            onmouseover="this.style.background='var(--green-dark)';this.style.color='#fff'"
+            onmouseout="this.style.background='transparent';this.style.color='var(--text-muted)'">— Clear —</div>`
+        : '';
+
+      return `<div class="player-search-wrap" style="margin-bottom:${si < bPps - 1 ? '2px' : '0'};position:relative">
+        <input type="text" class="player-search-input" id="${uid}" placeholder="${label}" value="${dn}"
+          data-selected-name="${dn}" autocomplete="off" ${night.viewOnly ? 'disabled' : ''}
+          style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:0.72rem"
+          onclick="openPlayerDropdown('${uid}')"
+          oninput="filterPlayerDropdown('${uid}')"
+          onkeydown="playerDropdownKey('${uid}',event)">
+        <div class="player-search-dropdown" id="${uid}-dropdown" data-picker-meta='{"b":${state.activeBlockIdx},"r":${r},"s":${si}}'
+          style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:4px;max-height:220px;overflow-y:auto;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.35)">
+          ${clearRow}${options}
+          <div data-player-nomatch style="display:none;padding:6px 8px;font-size:0.72rem;color:var(--text-muted)">No players found</div>
+        </div>
       </div>`;
     }).join('');
 
