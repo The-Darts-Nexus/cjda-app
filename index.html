@@ -157,6 +157,9 @@ const state = {
   nightBlocks: [],          // [{label, size, slots, legs, accolades, bonus}]
   nightAttendance: [],      // night_attendance rows (register)
   nightPlayoffs: [],        // night_playoff_matches rows (DIDO knockout)
+  compTeams: [],            // comp_teams rows (doubles/triples competition rosters)
+  compMatches: [],          // comp_matches rows (team round-robin results)
+  compSession: 1,           // active session tab in the doubles competition view
   assistant: { open: false, layoutIdx: 0, search: '' }, // Schedule Assistant panel
   // Data
   players: [],
@@ -255,6 +258,8 @@ async function loadAllData() {
     state.gdfAttendance= await run(sb.from('gdf_attendance').select('*').eq('space_id', SPACE_ID));
     state.nightAttendance = await run(sb.from('night_attendance').select('*').eq('space_id', SPACE_ID));
     state.nightPlayoffs = await run(sb.from('night_playoff_matches').select('*').eq('space_id', SPACE_ID));
+    state.compTeams = await run(sb.from('comp_teams').select('*').eq('space_id', SPACE_ID));
+    state.compMatches = await run(sb.from('comp_matches').select('*').eq('space_id', SPACE_ID));
     state.accolades  = await run(sb.from('accolades').select('*').eq('space_id', SPACE_ID));
 
     console.log('Data loaded:', { players: state.players.length, seasons: state.seasons.length, nightTypes: state.nightTypes.length });
@@ -304,6 +309,62 @@ function getCompNights() {
   return state.nights
     .filter(n => isCompNight(n.night_type_id))
     .sort((a,b) => b.date.localeCompare(a.date));
+}
+
+// ═══════════════════════════════════════════════
+// TEAM COMPETITIONS — Selected Doubles / Mix Doubles / Mixed Triples
+// Team round-robin, own tables, never feeds the Season Log (only per-player accolades do).
+// ═══════════════════════════════════════════════
+function isTeamComp(night) {
+  const n = night || state.activeNight;
+  return !!n && isCompNight(n.night_type_id) && getNightFormat(n.night_type_id) !== 'singles';
+}
+function compTeamsFor(nightId) {
+  return (state.compTeams || []).filter(t => t.night_id === nightId).sort((a, b) => a.seed - b.seed);
+}
+function compMatchesFor(nightId) {
+  return (state.compMatches || []).filter(m => m.night_id === nightId);
+}
+function compTeamName(team) {
+  if (!team) return '—';
+  const names = [team.player1_id, team.player2_id, team.player3_id]
+    .filter(Boolean)
+    .map(id => { const p = state.players.find(x => x.id === id); return p ? p.first_name : '?'; });
+  return names.length ? names.join(' & ') : `Team ${team.seed}`;
+}
+function compSessions(nightId) {
+  const s = new Set([1]);
+  compMatchesFor(nightId).forEach(m => s.add(m.session));
+  return [...s].sort((a, b) => a - b);
+}
+
+// Combined standings across all sessions: [{teamId, seed, name, gp, lw, gw, total, pos, bySession}]
+function getDoublesStandings(nightId) {
+  const teams = compTeamsFor(nightId);
+  const matches = compMatchesFor(nightId);
+  const rows = teams.map(t => {
+    let lw = 0, gw = 0, gp = 0;
+    const bySession = {};
+    matches.forEach(m => {
+      const isA = m.team_a_seed === t.seed, isB = m.team_b_seed === t.seed;
+      if (!isA && !isB) return;
+      const my = isA ? (m.a_legs || 0) : (m.b_legs || 0);
+      const opp = isA ? (m.b_legs || 0) : (m.a_legs || 0);
+      if (my === 0 && opp === 0) return;
+      lw += my; gp++;
+      if (my > opp) gw++;
+      const bs = bySession[m.session] || (bySession[m.session] = { lw: 0, gw: 0 });
+      bs.lw += my; if (my > opp) bs.gw++;
+    });
+    return { teamId: t.id, seed: t.seed, name: compTeamName(t), bonus: t.bonus || 0, gp, lw, gw, total: lw + gw * 2 + (t.bonus || 0), bySession };
+  });
+  rows.sort((a, b) => b.total - a.total || b.lw - a.lw || a.seed - b.seed);
+  rows.forEach((r, i) => { r.pos = i + 1; });
+  return rows;
+}
+function getDoublesWinner(nightId) {
+  const s = getDoublesStandings(nightId);
+  return s.length && s[0].gp ? s[0].name : null;
 }
 
 function getCompStandings(nightId) {
@@ -515,8 +576,10 @@ async function viewNight(nightId) {
       return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id };
     });
     await loadNightPlayoffs(nightId);
+    await loadCompTables(nightId);
     state.activeNight = { ...night, viewOnly: true };
     state.activeBlockIdx = 0;
+    state.compSession = 1;
   } catch(e) { console.error('viewNight error:', e); showToast('Error loading night', 'error'); }
   state.loading = false; render();
 }
@@ -638,6 +701,8 @@ async function openNightEntry(nightId) {
   }
 
   await loadNightPlayoffs(nightId);
+  await loadCompTables(nightId);
+  state.compSession = 1;
   state.activeNight = night;
   state.loading = false; render();
 }
@@ -649,6 +714,14 @@ async function loadNightPlayoffs(nightId) {
     ...(state.nightPlayoffs || []).filter(m => m.night_id !== nightId),
     ...(data || [])
   ];
+}
+
+// Refresh one competition's team + match rows in the global lists
+async function loadCompTables(nightId) {
+  const { data: teams } = await sb.from('comp_teams').select('*').eq('night_id', nightId);
+  const { data: matches } = await sb.from('comp_matches').select('*').eq('night_id', nightId);
+  state.compTeams = [...(state.compTeams || []).filter(t => t.night_id !== nightId), ...(teams || [])];
+  state.compMatches = [...(state.compMatches || []).filter(m => m.night_id !== nightId), ...(matches || [])];
 }
 
 function backFromNightEntry() {
@@ -1300,6 +1373,283 @@ function renderDidoPlayoffs() {
   `);
 }
 
+// ═══════════════════════════════════════════════
+// TEAM COMPETITION — mutations + entry view
+// ═══════════════════════════════════════════════
+function compHasResults(nightId) {
+  return compMatchesFor(nightId).some(m => (m.a_legs || 0) + (m.b_legs || 0) > 0);
+}
+
+async function addCompTeam() {
+  if (!state.activeNight || !isAdmin()) return;
+  const nightId = state.activeNight.id;
+  const seed = compTeamsFor(nightId).reduce((mx, t) => Math.max(mx, t.seed), 0) + 1;
+  const { error } = await sb.from('comp_teams').insert({ space_id: SPACE_ID, night_id: nightId, seed, bonus: 0 });
+  if (error) { showToast(error.message, 'error'); return; }
+  await loadCompTables(nightId); render();
+}
+
+async function removeCompTeam(seed) {
+  if (!state.activeNight || !isAdmin()) return;
+  const nightId = state.activeNight.id;
+  if (compMatchesFor(nightId).some(m => (m.team_a_seed === seed || m.team_b_seed === seed) && (m.a_legs || m.b_legs))) {
+    showToast('That team has results — clear them first', 'error'); return;
+  }
+  if (!confirm(`Remove Team ${seed}?`)) return;
+  await sb.from('comp_matches').delete().eq('night_id', nightId).or(`team_a_seed.eq.${seed},team_b_seed.eq.${seed}`);
+  await sb.from('comp_teams').delete().eq('night_id', nightId).eq('seed', seed);
+  await loadCompTables(nightId); render();
+}
+
+async function setCompTeamPlayer(seed, idx, playerId) {
+  if (!state.activeNight || !isAdmin()) return;
+  const nightId = state.activeNight.id;
+  const col = ['player1_id', 'player2_id', 'player3_id'][idx];
+  const { error } = await sb.from('comp_teams').update({ [col]: playerId || null, updated_at: new Date().toISOString() })
+    .eq('night_id', nightId).eq('seed', seed);
+  if (error) { showToast(error.message, 'error'); return; }
+  await loadCompTables(nightId); render();
+}
+
+async function setCompTeamBonus(seed, val) {
+  if (!state.activeNight || !isAdmin()) return;
+  const nightId = state.activeNight.id;
+  await sb.from('comp_teams').update({ bonus: Math.max(0, parseInt(val) || 0), updated_at: new Date().toISOString() })
+    .eq('night_id', nightId).eq('seed', seed);
+  await loadCompTables(nightId); render();
+}
+
+function addCompSession() {
+  if (!state.activeNight) return;
+  state.compSession = Math.max(...compSessions(state.activeNight.id)) + 1;
+  render();
+}
+
+async function updateCompMatch(session, forSeed, vsSeed, val) {
+  if (!state.activeNight || !isAdmin() || forSeed === vsSeed) return;
+  const nightId = state.activeNight.id;
+  const v = Math.max(0, Math.min(9, parseInt(val) || 0));
+  const lo = Math.min(forSeed, vsSeed), hi = Math.max(forSeed, vsSeed);
+  const field = forSeed === lo ? 'a_legs' : 'b_legs';
+  const existing = compMatchesFor(nightId).find(m => m.session === session && m.team_a_seed === lo && m.team_b_seed === hi);
+  if (existing) {
+    await sb.from('comp_matches').update({ [field]: v, updated_at: new Date().toISOString() }).eq('id', existing.id);
+  } else {
+    const row = { space_id: SPACE_ID, night_id: nightId, session, team_a_seed: lo, team_b_seed: hi, a_legs: 0, b_legs: 0 };
+    row[field] = v;
+    await sb.from('comp_matches').insert(row);
+  }
+  await loadCompTables(nightId); render();
+}
+
+async function addCompAccolade(playerId, type, value) {
+  if (!state.activeNight || !isAdmin() || !playerId) { if (!playerId) showToast('Pick a player', 'error'); return; }
+  const nightId = state.activeNight.id;
+  const seasonId = getActiveSeasonId();
+  let accType = type, v = 1;
+  if (type === 'hc') { const n = parseInt(value) || 0; if (!n) { showToast('Enter the checkout value', 'error'); return; } accType = n === 170 ? '170_close' : 'high_close'; v = n; }
+  else if (type === 'l15') { accType = '15_dart'; v = parseInt(value) || 14; }
+  const { error } = await sb.from('accolades').insert({ space_id: SPACE_ID, player_id: playerId, night_id: nightId, season_id: seasonId, accolade_type: accType, value: v });
+  if (error) { showToast(error.message, 'error'); return; }
+  const { data } = await sb.from('accolades').select('*').eq('space_id', SPACE_ID);
+  state.accolades = data || [];
+  showToast('Accolade added');
+  render();
+}
+
+async function removeCompAccolade(accId) {
+  if (!isAdmin()) return;
+  await sb.from('accolades').delete().eq('id', accId);
+  const { data } = await sb.from('accolades').select('*').eq('space_id', SPACE_ID);
+  state.accolades = data || [];
+  render();
+}
+
+async function setCompStatus(status) {
+  if (!state.activeNight || !isAdmin()) return;
+  await sb.from('nights').update({ status }).eq('id', state.activeNight.id);
+  state.activeNight.status = status;
+  const nn = state.nights.find(n => n.id === state.activeNight.id);
+  if (nn) nn.status = status;
+  showToast(status === 'locked' ? 'Competition locked' : 'Competition reopened');
+  render();
+}
+
+function backFromCompEntry() {
+  state.activeNight = null;
+  state.competitionNightId = null;
+  state.nightBlocks = [];
+  state.compSession = 1;
+  state.tab = 'competitions';
+  render();
+}
+
+function renderDoublesComp() {
+  const night = state.activeNight;
+  if (!night) return renderCompetitions();
+  const admin = isAdmin();
+  const nightId = night.id;
+  const ntName = (state.nightTypes.find(t => t.id === night.night_type_id) || {}).name || 'Competition';
+  const teams = compTeamsFor(nightId);
+  const matches = compMatchesFor(nightId);
+  const sessions = compSessions(nightId);
+  if (!sessions.includes(state.compSession)) state.compSession = sessions[0];
+  const sess = state.compSession;
+  const pps = getPlayersPerSlot(getNightFormat(night.night_type_id));
+  const hasResults = compHasResults(nightId);
+  const locked = night.status === 'locked';
+  const standings = getDoublesStandings(nightId);
+  const multiSess = sessions.length > 1;
+
+  const playerOpts = (selId) => `<option value="">—</option>` + (state.players || [])
+    .slice().sort((a, z) => (a.first_name + a.last_name).localeCompare(z.first_name + z.last_name))
+    .map(p => `<option value="${p.id}" ${p.id === selId ? 'selected' : ''}>${pickerAttr(p.first_name + ' ' + p.last_name)}</option>`).join('');
+
+  const legAt = (fs, vs) => {
+    const lo = Math.min(fs, vs), hi = Math.max(fs, vs);
+    const m = matches.find(x => x.session === sess && x.team_a_seed === lo && x.team_b_seed === hi);
+    if (!m) return 0;
+    return fs === lo ? (m.a_legs || 0) : (m.b_legs || 0);
+  };
+  const sessRow = (t) => {
+    let lw = 0, gw = 0;
+    teams.forEach(o => { if (o.seed === t.seed) return; const my = legAt(t.seed, o.seed), op = legAt(o.seed, t.seed); if (my || op) { lw += my; if (my > op) gw++; } });
+    return { lw, gw };
+  };
+
+  const header = `
+    <div class="card" style="padding:14px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div>
+          <h2 style="font-size:1.15rem;letter-spacing:0.08em;color:var(--text)">${ntName}${night.notes ? ' — ' + pickerAttr(night.notes) : ''}</h2>
+          <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${formatDate(night.date)} · team round-robin · ${teams.length} team${teams.length !== 1 ? 's' : ''}${locked ? ' · locked' : ''}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="backFromCompEntry()">← Back</button>
+          ${admin ? (locked
+            ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="setCompStatus('draft')">Reopen</button>`
+            : `<button class="btn btn-primary" style="font-size:0.72rem;padding:5px 10px" onclick="setCompStatus('locked')">Lock competition</button>`) : ''}
+        </div>
+      </div>
+    </div>`;
+
+  const roster = !admin ? '' : `
+    <div class="card" style="padding:14px">
+      <div class="form-label" style="margin-bottom:8px">Teams</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${teams.map(t => `
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="font-size:0.7rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;width:52px">Team ${t.seed}</span>
+            ${Array.from({ length: pps }, (_, i) => `
+              <select ${hasResults ? 'disabled' : ''} onchange="setCompTeamPlayer(${t.seed},${i},this.value)" style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 5px;max-width:150px">
+                ${playerOpts([t.player1_id, t.player2_id, t.player3_id][i])}
+              </select>`).join('')}
+            <label style="font-size:0.64rem;color:var(--text-muted);display:flex;align-items:center;gap:3px">Bonus
+              <input type="number" min="0" value="${t.bonus || 0}" onchange="setCompTeamBonus(${t.seed},this.value)" style="width:34px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.7rem">
+            </label>
+            ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.6rem;padding:2px 7px;color:var(--red)" onclick="removeCompTeam(${t.seed})">×</button>` : ''}
+          </div>`).join('') || '<div style="font-size:0.72rem;color:var(--text-muted)">No teams yet.</div>'}
+      </div>
+      ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px;margin-top:8px" onclick="addCompTeam()">+ Add Team</button>` : ''}
+    </div>`;
+
+  const sessTabs = `
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      ${sessions.map(s => `<button class="btn ${s === sess ? 'btn-primary' : 'btn-ghost'}" style="font-size:0.72rem;padding:4px 12px" onclick="state.compSession=${s};render()">Session ${s}</button>`).join('')}
+      ${admin && !locked ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:4px 10px" onclick="addCompSession()">+ Session</button>` : ''}
+    </div>`;
+
+  const grid = !teams.length ? `<div style="font-size:0.75rem;color:var(--text-muted);padding:8px 0">Add teams to start entering results.</div>` : `
+    <div style="overflow-x:auto">
+      <table class="block-sheet">
+        <thead><tr>
+          <th style="text-align:left">Team</th>
+          ${teams.map(t => `<th title="${pickerAttr(compTeamName(t))}">${t.seed}</th>`).join('')}
+          <th>LW</th><th>GW</th>
+        </tr></thead>
+        <tbody>
+          ${teams.map(row => {
+            const sr = sessRow(row);
+            return `<tr>
+              <td style="text-align:left;white-space:nowrap;font-size:0.72rem">${row.seed}. ${pickerAttr(compTeamName(row))}</td>
+              ${teams.map(col => {
+                if (col.seed === row.seed) return `<td style="background:#1A1A1A"></td>`;
+                return `<td style="padding:1px;text-align:center">
+                  <input type="number" min="0" max="9" value="${legAt(row.seed, col.seed)}" ${admin && !locked ? '' : 'disabled'}
+                    onchange="updateCompMatch(${sess},${row.seed},${col.seed},this.value)"
+                    style="width:30px;background:transparent;border:none;color:var(--text);text-align:center;font-size:0.85rem;font-family:'Share Tech Mono',monospace;font-weight:700">
+                </td>`;
+              }).join('')}
+              <td style="text-align:center;font-size:0.75rem;color:var(--text-muted)">${sr.lw}</td>
+              <td style="text-align:center;font-size:0.75rem;color:var(--text-muted)">${sr.gw}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  const standingsTable = !standings.length ? '' : `
+    <div class="card" style="padding:14px">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em;color:var(--green-accent);font-weight:700;text-transform:uppercase;margin-bottom:8px">Standings</div>
+      <div style="overflow-x:auto">
+        <table class="block-sheet">
+          <thead><tr>
+            <th>Pos</th><th style="text-align:left">Team</th><th>GP</th><th>LW</th><th>GW</th>
+            ${multiSess ? sessions.map(s => `<th>S${s} LW</th>`).join('') : ''}
+            <th style="color:#ffc9c9">Total</th>
+          </tr></thead>
+          <tbody>
+            ${standings.map(r => `<tr>
+              <td style="text-align:center;font-weight:700;color:var(--green-accent)">${r.pos}</td>
+              <td style="text-align:left;white-space:nowrap;font-weight:600">${pickerAttr(r.name)}</td>
+              <td style="text-align:center;color:var(--text-muted)">${r.gp}</td>
+              <td style="text-align:center;color:var(--text-muted)">${r.lw}</td>
+              <td style="text-align:center;color:var(--text-muted)">${r.gw}</td>
+              ${multiSess ? sessions.map(s => `<td style="text-align:center;color:var(--text-muted);font-size:0.7rem">${r.bySession[s] ? r.bySession[s].lw : '·'}</td>`).join('') : ''}
+              <td style="text-align:center;font-weight:700;color:var(--red)">${r.total}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  const nightAcc = (state.accolades || []).filter(a => a.night_id === nightId);
+  const accName = { '180': '180', '171': '171', 'high_close': 'H/C', '170_close': 'H/C', '15_dart': 'L15' };
+  const accList = `
+    <div class="card" style="padding:14px">
+      <div class="form-label" style="margin-bottom:8px">Accolades <span style="font-weight:400;text-transform:none;color:var(--text-muted)">— per player · count toward season stats</span></div>
+      ${nightAcc.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        ${nightAcc.map(a => {
+          const p = state.players.find(x => x.id === a.player_id);
+          const hasVal = a.accolade_type === 'high_close' || a.accolade_type === '170_close' || a.accolade_type === '15_dart';
+          const lbl = `${p ? p.first_name + ' ' + p.last_name : '?'} · ${accName[a.accolade_type] || a.accolade_type}${hasVal ? ' ' + a.value : ''}`;
+          return `<span class="acc-badge acc-171" style="font-size:0.66rem">${pickerAttr(lbl)}${admin && !locked ? ` <span onclick="removeCompAccolade('${a.id}')" style="cursor:pointer;color:var(--red);margin-left:3px">×</span>` : ''}</span>`;
+        }).join('')}
+      </div>` : `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:8px">None recorded.</div>`}
+      ${admin && !locked ? `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <select id="cacc-player" style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 5px">${playerOpts('')}</select>
+          <select id="cacc-type" onchange="document.getElementById('cacc-val').style.display=(this.value==='hc'||this.value==='l15')?'inline-block':'none'" style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 5px">
+            <option value="180">180</option><option value="171">171</option><option value="hc">H/C</option><option value="l15">L15</option>
+          </select>
+          <input id="cacc-val" type="number" placeholder="val" style="display:none;width:50px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.72rem">
+          <button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 10px" onclick="addCompAccolade(document.getElementById('cacc-player').value, document.getElementById('cacc-type').value, document.getElementById('cacc-val').value)">+ Add</button>
+        </div>` : ''}
+    </div>`;
+
+  return `
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px;max-width:1400px;margin:0 auto">
+      ${header}
+      ${roster}
+      <div class="card" style="padding:14px">
+        ${sessTabs}
+        <div style="margin-top:10px">${grid}</div>
+      </div>
+      ${standingsTable}
+      ${accList}
+    </div>`;
+}
+
 async function submitNight() {
   if (!state.activeNight) return;
   if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
@@ -1803,26 +2153,38 @@ function renderHomeCompetitions() {
   const cols = Object.entries(byType).map(([typeName, nights]) => {
     // Use most recent completed competition for this type
     const latest = nights[0];
-    const standings = getCompStandings(latest.id);
-    const blocks = standings.map(grp => {
-      const top3 = grp.players.slice(0,3);
-      return `
-        <div style="margin-bottom:8px">
-          <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">${grp.label}</div>
-          ${top3.map((p,i) => `
+    let body;
+    if (isTeamComp(latest)) {
+      const top3 = getDoublesStandings(latest.id).slice(0, 3);
+      body = top3.length
+        ? `<div style="margin-bottom:4px">${latest.notes ? `<div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">${latest.notes}</div>` : ''}${top3.map((t, i) => `
             <div style="display:flex;align-items:center;gap:6px;padding:2px 0">
-              <span style="font-size:0.75rem">${medal(i+1)}</span>
-              <span style="font-size:0.75rem;font-weight:${i===0?'700':'500'};color:${i===0?'var(--green-accent)':'var(--text)'}">${p.name}</span>
-              <span style="font-size:0.68rem;color:var(--text-muted);margin-left:auto">${p.total}pts</span>
-            </div>`).join('')}
-          ${!top3.length ? '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>' : ''}
-        </div>`;
-    }).join('');
+              <span style="font-size:0.75rem">${medal(i + 1)}</span>
+              <span style="font-size:0.75rem;font-weight:${i === 0 ? '700' : '500'};color:${i === 0 ? 'var(--green-accent)' : 'var(--text)'}">${t.name}</span>
+              <span style="font-size:0.68rem;color:var(--text-muted);margin-left:auto">${t.total}pts</span>
+            </div>`).join('')}</div>`
+        : '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>';
+    } else {
+      body = getCompStandings(latest.id).map(grp => {
+        const top3 = grp.players.slice(0, 3);
+        return `
+          <div style="margin-bottom:8px">
+            <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">${grp.label}</div>
+            ${top3.map((p, i) => `
+              <div style="display:flex;align-items:center;gap:6px;padding:2px 0">
+                <span style="font-size:0.75rem">${medal(i + 1)}</span>
+                <span style="font-size:0.75rem;font-weight:${i === 0 ? '700' : '500'};color:${i === 0 ? 'var(--green-accent)' : 'var(--text)'}">${p.name}</span>
+                <span style="font-size:0.68rem;color:var(--text-muted);margin-left:auto">${p.total}pts</span>
+              </div>`).join('')}
+            ${!top3.length ? '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>' : ''}
+          </div>`;
+      }).join('') || '<div style="font-size:0.72rem;color:var(--text-muted)">No block data</div>';
+    }
     return `
       <div style="min-width:180px;border-right:1px solid var(--border);padding:8px 12px;flex-shrink:0">
         <div style="font-family:'Bebas Neue',sans-serif;font-size:0.85rem;letter-spacing:0.08em;color:var(--text);margin-bottom:4px">${typeName}</div>
         <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:8px">${formatDate(latest.date)}</div>
-        ${blocks || '<div style="font-size:0.72rem;color:var(--text-muted)">No block data</div>'}
+        ${body}
       </div>`;
   }).join('');
 
@@ -2774,11 +3136,12 @@ function renderCompetitions() {
             <thead><tr><th>Date</th><th>Type</th><th>Winner</th><th></th></tr></thead>
             <tbody>
               ${completed.map(n => {
-                const standings = getCompStandings(n.id);
-                const winner = standings.length && standings[0].players.length ? standings[0].players[0].name : '—';
+                let winner = '—';
+                if (isTeamComp(n)) { winner = getDoublesWinner(n.id) || '—'; }
+                else { const s = getCompStandings(n.id); winner = s.length && s[0].players.length ? s[0].players[0].name : '—'; }
                 return `<tr>
                   <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
-                  <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}</td>
+                  <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}${n.notes?' — '+n.notes:''}</td>
                   <td style="font-size:0.78rem;font-weight:600;color:var(--green-accent)">🏆 ${winner}</td>
                   <td><div style="display:flex;gap:4px"><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewCompetition('${n.id}')">View →</button>${isAdmin()?`<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteCompetition('${n.id}')">🗑</button>`:''}</div></td>
                 </tr>`;
@@ -2790,11 +3153,9 @@ function renderCompetitions() {
 }
 
 function renderCompetitionEntry() {
-  // Reuse night setup block entry but with competition context
-  const savedTab = state.tab;
   if (!state.activeNight) return renderCompetitions();
-  const entryHTML = renderBlockEntry();
-  return entryHTML;
+  if (isTeamComp(state.activeNight)) return renderDoublesComp();
+  return renderBlockEntry();
 }
 
 function openCreateCompetition() {
@@ -2811,6 +3172,8 @@ async function deleteNight(nightId) {
   try {
     await sb.from('night_attendance').delete().eq('night_id', nightId);
     await sb.from('night_playoff_matches').delete().eq('night_id', nightId);
+    await sb.from('comp_matches').delete().eq('night_id', nightId);
+    await sb.from('comp_teams').delete().eq('night_id', nightId);
     await sb.from('accolades').delete().eq('night_id', nightId);
     await sb.from('results').delete().eq('night_id', nightId);
     const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
@@ -2833,6 +3196,8 @@ async function deleteCompetition(nightId) {
     // Delete attendance, accolades, results, block_players, blocks, then night
     await sb.from('night_attendance').delete().eq('night_id', nightId);
     await sb.from('night_playoff_matches').delete().eq('night_id', nightId);
+    await sb.from('comp_matches').delete().eq('night_id', nightId);
+    await sb.from('comp_teams').delete().eq('night_id', nightId);
     await sb.from('accolades').delete().eq('night_id', nightId);
     await sb.from('results').delete().eq('night_id', nightId);
     const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
@@ -2987,8 +3352,8 @@ function renderModal() {
               </select>
             </div>
             <div>
-              <label class="form-label">Notes (optional)</label>
-              <input class="form-input" value="${d.notes||''}" oninput="updateModalField('notes',this.value)" placeholder="Any notes">
+              <label class="form-label">Section / label (optional)</label>
+              <input class="form-input" value="${d.notes||''}" oninput="updateModalField('notes',this.value)" placeholder="e.g. Men, Ladies">
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end">
               <button class="btn btn-ghost" onclick="state.modal=null;render()">Cancel</button>
