@@ -1497,7 +1497,7 @@ async function removeCompAccolade(accId) {
 
 async function setCompStatus(status) {
   if (!state.activeNight || !isAdmin()) return;
-  if (status === 'locked' && !confirm('Submit and close off this competition?\n\nIt moves to the Completed list, the winning pair is announced on the Home screen, and the grid becomes read-only. You can Reopen it later if you need to fix results.')) return;
+  if (status === 'locked' && !confirm('Submit and close off this competition?\n\nIt moves to the Completed list, shows in Competition Results on the Home screen, and the grid becomes read-only. You can Reopen it later if you need to fix results.')) return;
   await sb.from('nights').update({ status }).eq('id', state.activeNight.id);
   state.activeNight.status = status;
   const nn = state.nights.find(n => n.id === state.activeNight.id);
@@ -1536,7 +1536,7 @@ function compPlayerPicker(seed, idx, curId, disabled) {
         onmouseover="this.style.background='var(--green-dark)';this.style.color='#fff'"
         onmouseout="this.style.background='transparent';this.style.color='var(--text-muted)'">— Clear —</div>`
     : '';
-  return `<div class="player-search-wrap" style="position:relative;flex:1;min-width:120px;max-width:180px">
+  return `<div class="player-search-wrap" style="position:relative;flex:1 1 130px;min-width:120px;max-width:190px">
     <input type="text" class="player-search-input" id="${uid}" placeholder="Player ${idx + 1}" value="${dn}"
       data-selected-name="${dn}" autocomplete="off" ${disabled ? 'disabled' : ''}
       style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:0.72rem"
@@ -1583,18 +1583,20 @@ function renderDoublesComp() {
   };
 
   const dateText = night.end_date ? fmtGdfDate(night.date, night.end_date) : formatDate(night.date);
+  const dateInputStyle = "width:150px;background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:4px 6px";
+  const dateLabelStyle = "font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);white-space:nowrap";
   const dateEditor = (admin && !locked) ? `
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
-          <label style="font-size:0.64rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">Start date
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <span style="${dateLabelStyle}">Start date</span>
             <input type="date" id="comp-start-date" value="${night.date || ''}"
-              onchange="updateCompDates(this.value, document.getElementById('comp-end-date').value)"
-              style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 6px">
-          </label>
-          <label style="font-size:0.64rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">End date <span style="opacity:0.6">(optional)</span>
+              onchange="updateCompDates(this.value, document.getElementById('comp-end-date').value)" style="${dateInputStyle}">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <span style="${dateLabelStyle}">End date <span style="text-transform:none;opacity:0.55">· optional</span></span>
             <input type="date" id="comp-end-date" value="${night.end_date || ''}" min="${night.date || ''}"
-              onchange="updateCompDates(document.getElementById('comp-start-date').value, this.value)"
-              style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 6px">
-          </label>
+              onchange="updateCompDates(document.getElementById('comp-start-date').value, this.value)" style="${dateInputStyle}">
+          </div>
         </div>` : '';
 
   const header = `
@@ -1616,20 +1618,17 @@ function renderDoublesComp() {
 
   const roster = !admin ? '' : `
     <div class="card" style="padding:14px">
-      <div class="form-label" style="margin-bottom:8px">Teams <span style="font-weight:400;text-transform:none;color:var(--text-muted)">— the team name is the players' first names</span></div>
-      <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="form-label" style="margin-bottom:8px">Teams <span style="font-weight:400;text-transform:none;color:var(--text-muted)">— name is the players' first names</span></div>
+      <div style="display:flex;flex-direction:column;gap:5px">
         ${teams.map(t => `
-          <div style="display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--card2);border:1px solid var(--border);border-radius:6px">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-              <span style="font-size:0.82rem;font-weight:700;color:var(--green-accent)">${t.seed}. ${pickerAttr(compTeamName(t))}</span>
-              ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.6rem;padding:2px 8px;color:var(--red)" onclick="removeCompTeam(${t.seed})">Remove</button>` : ''}
-            </div>
-            <div style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap">
-              ${Array.from({ length: pps }, (_, i) => compPlayerPicker(t.seed, i, [t.player1_id, t.player2_id, t.player3_id][i], hasResults)).join('')}
-              <label style="font-size:0.62rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">Bonus
-                <input type="number" min="0" value="${t.bonus || 0}" onchange="setCompTeamBonus(${t.seed},this.value)" style="width:44px;background:var(--card);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.72rem;padding:3px 4px">
-              </label>
-            </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0">
+            <span style="font-size:0.75rem;font-weight:700;color:var(--green-accent);min-width:120px;flex-shrink:0">${t.seed}. ${pickerAttr(compTeamName(t))}</span>
+            ${Array.from({ length: pps }, (_, i) => compPlayerPicker(t.seed, i, [t.player1_id, t.player2_id, t.player3_id][i], hasResults)).join('')}
+            <span style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+              <span style="font-size:0.58rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted)">Bonus</span>
+              <input type="number" min="0" value="${t.bonus || 0}" ${hasResults ? 'disabled' : ''} onchange="setCompTeamBonus(${t.seed},this.value)" style="width:40px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.72rem;padding:3px 4px">
+            </span>
+            ${!hasResults ? `<button class="btn btn-ghost" title="Remove team" style="font-size:0.85rem;line-height:1;padding:2px 7px;color:var(--red);flex-shrink:0" onclick="removeCompTeam(${t.seed})">×</button>` : ''}
           </div>`).join('') || '<div style="font-size:0.72rem;color:var(--text-muted)">No teams yet.</div>'}
       </div>
       ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px;margin-top:8px" onclick="addCompTeam()">+ Add Team</button>` : ''}
@@ -1727,7 +1726,7 @@ function renderDoublesComp() {
 
   const footerNote = !admin ? '' : `
     <div style="font-size:0.68rem;color:var(--text-muted);line-height:1.55;padding:2px 2px 0">
-      <strong style="color:var(--text)">Submit Competition</strong> closes it off — it moves from Draft to the Completed list on the Competitions tab, the winning pair is announced on the Home screen, and the grid becomes read-only. Hit <strong style="color:var(--text)">Reopen</strong> if you need to fix a result afterwards. Player accolades still count toward season stats either way.
+      <strong style="color:var(--text)">Submit Competition</strong> closes it off — it moves from Draft to the Completed list on the Competitions tab, shows in Competition Results on the Home screen, and the grid becomes read-only. Hit <strong style="color:var(--text)">Reopen</strong> if you need to fix a result afterwards. Player accolades still count toward season stats either way.
     </div>`;
 
   return `
@@ -2409,29 +2408,6 @@ function renderHome() {
       </div>`;
       })()}
 
-      ${(() => {
-        const champs = getDoublesChampions().slice(0, 6);
-        if (!champs.length) return '';
-        return `
-      <!-- Team-competition Champions -->
-      <div class="card" style="overflow:hidden">
-        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">🏆 DOUBLES CHAMPIONS</div>
-          <div style="font-size:0.65rem;color:var(--text-muted)">Winning pair of each team competition</div>
-        </div>
-        <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
-          ${champs.map(c => `
-            <div class="card2" style="padding:6px 12px;display:flex;align-items:center;gap:8px">
-              <span style="font-size:0.9rem">🏆</span>
-              <div>
-                <div style="font-size:0.8rem;font-weight:700;color:var(--green-accent)">${c.name}</div>
-                <div style="font-size:0.62rem;color:var(--text-muted)">${c.label ? c.label + ' · ' : ''}${formatDate(c.date)}</div>
-              </div>
-            </div>`).join('')}
-        </div>
-      </div>`;
-      })()}
-
       <!-- Competition Results -->
       <div class="card" style="overflow:hidden">
         <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
@@ -2444,18 +2420,6 @@ function renderHome() {
       </div>
 
     </div>`;
-}
-
-// Most-recent-first list of team-competition winners: {name, label, date, nightId}
-function getDoublesChampions() {
-  return (state.nights || [])
-    .filter(n => isTeamComp(n) && (n.status === 'locked' || n.status === 'submitted'))
-    .map(n => {
-      const w = getDoublesWinner(n.id);
-      return w ? { name: w, label: n.notes || '', date: n.date, nightId: n.id } : null;
-    })
-    .filter(Boolean)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 // Most-recent-first list of DIDO playoff winners: {name, date, nightId, playerId}
