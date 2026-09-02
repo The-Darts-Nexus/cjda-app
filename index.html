@@ -1242,6 +1242,60 @@ function didoNightWinner(nightId) {
   return fin ? fin.winner_id : null;
 }
 
+// DIDO block standings from loaded global state (blocks / results / blockPlayers).
+// Ordered: total desc → games won → legs → head-to-head (same block) → slot.
+function didoStateStandings(nightId) {
+  const rows = [];
+  (state.blocks || []).filter(b => b.night_id === nightId).forEach(block => {
+    const bps = (state.blockPlayers || []).filter(bp => bp.block_id === block.id)
+      .slice().sort((a, z) => (a.slot_index || 0) - (z.slot_index || 0));
+    const res = (state.results || []).filter(r => r.block_id === block.id);
+    const legOf = (pid, oppId) => {
+      const r = res.find(x => (x.home_player_id === pid && x.away_player_id === oppId) ||
+                              (x.home_player_id === oppId && x.away_player_id === pid));
+      if (!r) return null;
+      return r.home_player_id === pid ? (r.home_legs || 0) : (r.away_legs || 0);
+    };
+    bps.forEach(bp => {
+      let legs = 0, gw = 0;
+      bps.forEach(o => {
+        if (o.player_id === bp.player_id) return;
+        const my = legOf(bp.player_id, o.player_id);
+        if (my == null) return;
+        const opp = legOf(o.player_id, bp.player_id) || 0;
+        legs += my; if (my > opp) gw++;
+      });
+      rows.push({ pid: bp.player_id, blockId: block.id, slot: bp.slot_index || 0, legs, gw, total: legs + gw * 2 + (block.bonus || 0), legOf });
+    });
+  });
+  rows.sort((a, z) => z.total - a.total || z.gw - a.gw || z.legs - a.legs);
+  for (let i = 0; i < rows.length;) {
+    let j = i;
+    while (j + 1 < rows.length && ['total', 'gw', 'legs'].every(k => rows[j + 1][k] === rows[i][k])) j++;
+    if (j > i) {
+      const grp = rows.slice(i, j + 1);
+      grp.forEach(g => {
+        g.h2h = grp.reduce((w, o) => (o.pid === g.pid || o.blockId !== g.blockId) ? w
+          : w + ((g.legOf(g.pid, o.pid) || 0) > (g.legOf(o.pid, g.pid) || 0) ? 1 : 0), 0);
+      });
+      grp.sort((a, z) => (z.h2h || 0) - (a.h2h || 0) || a.slot - z.slot);
+      for (let k = 0; k < grp.length; k++) rows[i + k] = grp[k];
+    }
+    i = j + 1;
+  }
+  return rows.map(r => ({ pid: r.pid, total: r.total, gw: r.gw, legs: r.legs }));
+}
+
+// The night's DIDO winner: the playoff Final winner, or (no playoff at all) the block-standings leader.
+function didoNightWinnerId(nightId) {
+  const pm = (state.nightPlayoffs || []).filter(m => m.night_id === nightId);
+  const fin = pm.find(m => m.round === 3 && m.winner_id);
+  if (fin) return fin.winner_id;
+  if (pm.length) return null;                     // playoff bracket exists but not finished
+  const st = didoStateStandings(nightId);
+  return st.length ? st[0].pid : null;
+}
+
 async function persistPlayoffMatches(matches) {
   const rows = matches.map(m => ({
     id: m.id, space_id: SPACE_ID, night_id: m.night_id,
@@ -1350,18 +1404,25 @@ function renderDidoPlayoffs() {
       ${inner}
     </div>`;
 
+  // No playoff bracket — the night's winner is the block-standings leader.
+  const stdWinner = didoNightWinnerId(nightId);
+  const stdBanner = stdWinner
+    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 DIDO WINNER — ${(state.players.find(x => x.id === stdWinner) || {}).first_name || ''} ${(state.players.find(x => x.id === stdWinner) || {}).last_name || ''}<div style="font-size:0.6rem;letter-spacing:0.06em;opacity:0.85;margin-top:2px">BY BLOCK STANDINGS · NO PLAYOFF</div></div>`
+    : '';
+
   if (!matches.length) {
-    if (!admin) return shell(`<div style="font-size:0.75rem;color:var(--text-muted)">No playoff bracket yet.</div>`);
     const q = didoQualifiers();
     const ready = q.length === 4 && q.every(x => x.first && x.second);
+    if (!admin) return shell(`<div style="font-size:0.75rem;color:var(--text-muted)">${stdWinner ? 'No playoff was played this night.' : 'No playoff bracket yet.'}</div>${stdBanner}`);
     const tieNote = q.some(x => x.secondTied)
       ? `<div style="font-size:0.72rem;color:#FFA500;margin-bottom:8px">⚠ A block's 2nd place is tied on head-to-head — you can correct the seed after generating.</div>` : '';
     return shell(`
       ${tieNote}
       <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">
-        ${q.length === 4 ? 'Top 2 of each block seed an 8-player knockout — QF is 1 leg, SF &amp; Final are 3 legs.' : `Needs exactly 4 blocks with a complete top 2 (currently ${blocks.length}).`}
+        ${q.length === 4 ? 'Top 2 of each block seed an 8-player knockout — QF is 1 leg, SF &amp; Final are 3 legs.' : `Needs exactly 4 blocks with a complete top 2 (currently ${blocks.length}). No playoff = the DIDO goes to the block-standings leader.`}
       </div>
       <button class="btn btn-primary" style="font-size:0.82rem;padding:9px 16px" ${ready ? '' : 'disabled'} onclick="generateDidoPlayoffs()">⚡ Generate Playoffs</button>
+      ${stdBanner}
     `);
   }
 
@@ -2447,7 +2508,7 @@ function renderHome() {
       <div class="card" style="overflow:hidden">
         <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">🏆 DIDO CHAMPIONS</div>
-          <div style="font-size:0.65rem;color:var(--text-muted)">Winner of each DIDO playoff</div>
+          <div style="font-size:0.65rem;color:var(--text-muted)">Winner of each DIDO night — playoff, or block standings</div>
         </div>
         <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
           ${champs.map(c => `
@@ -2478,12 +2539,12 @@ function renderHome() {
 
 // Most-recent-first list of DIDO playoff winners: {name, date, nightId, playerId}
 function getDidoChampions() {
-  return (state.nightPlayoffs || [])
-    .filter(m => m.round === 3 && m.winner_id)
-    .map(m => {
-      const night = state.nights.find(n => n.id === m.night_id);
-      const p = state.players.find(x => x.id === m.winner_id);
-      return night && p ? { name: `${p.first_name} ${p.last_name}`, date: night.date, nightId: m.night_id, playerId: m.winner_id } : null;
+  return (state.nights || [])
+    .filter(n => nightIsDido(n) && (n.status === 'locked' || n.status === 'submitted'))
+    .map(n => {
+      const pid = didoNightWinnerId(n.id);
+      const p = pid && state.players.find(x => x.id === pid);
+      return p ? { name: `${p.first_name} ${p.last_name}`, date: n.date, nightId: n.id, playerId: pid } : null;
     })
     .filter(Boolean)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -2653,6 +2714,8 @@ function renderPlayers() {
   const catLabel = { men:'Men', ladies:'Ladies', junior_boy:'Junior (Boy)', junior_girl:'Junior (Girl)' };
   const grouped = {};
   cats.forEach(c => { grouped[c] = state.players.filter(p => p.category === c); });
+  const didoWins = {};
+  getDidoChampions().forEach(c => { didoWins[c.playerId] = (didoWins[c.playerId] || 0) + 1; });
 
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
@@ -2678,10 +2741,7 @@ function renderPlayers() {
               <tbody>
                 ${grouped[cat].map(p => `
                   <tr>
-                    <td style="font-weight:600">${p.first_name} ${p.last_name}${(() => {
-                      const w = (state.nightPlayoffs || []).filter(m => m.round === 3 && m.winner_id === p.id).length;
-                      return w ? ` <span class="acc-badge acc-170" style="font-size:0.6rem">🏆 DIDO ×${w}</span>` : '';
-                    })()}</td>
+                    <td style="font-weight:600">${p.first_name} ${p.last_name}${didoWins[p.id] ? ` <span class="acc-badge acc-170" style="font-size:0.6rem">🏆 DIDO ×${didoWins[p.id]}</span>` : ''}</td>
                     <td class="mono" style="font-size:0.72rem;color:var(--text-muted)">${p.dsa_number || '—'}</td>
                     <td><span class="pill pill-${p.status}">${p.status}</span></td>
                     <td style="color:var(--text-muted);font-size:0.72rem">${p.email || '—'}</td>
