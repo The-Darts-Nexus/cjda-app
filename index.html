@@ -586,6 +586,31 @@ async function viewNight(nightId) {
   state.loading = false; render();
 }
 
+// Admin: reopen a locked/submitted league night for editing (mirrors the competition Reopen).
+async function reopenNight(nightId) {
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  const night = state.nights.find(n => n.id === nightId);
+  if (!night) return;
+  if (!confirm(`Reopen ${formatDate(night.date)} for editing?\n\nIt moves back to Draft Nights so you can add or fix blocks, then Submit again. Season Log totals recalculate on the next submit.`)) return;
+  state.loading = true; render();
+  try {
+    await sb.from('nights').update({ status: 'draft' }).eq('id', nightId);
+    const { data: blocks } = await sb.from('blocks').select('id').eq('night_id', nightId);
+    if (blocks && blocks.length) {
+      await sb.from('blocks').update({ status: 'open' }).eq('night_id', nightId);
+    }
+    night.status = 'draft';
+    showToast('Night reopened — find it under Draft Nights');
+    await loadAllData();
+    await openNightEntry(nightId);
+    return;
+  } catch (e) {
+    console.error('reopenNight error:', e);
+    showToast('Error reopening night: ' + e.message, 'error');
+  }
+  state.loading = false; render();
+}
+
 function openCreateNight() {
   const today = new Date().toISOString().split('T')[0];
   state.modal = {
@@ -2750,7 +2775,7 @@ function renderNightSetup() {
                   <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
                   <td style="color:var(--text-muted);font-size:0.75rem">${n.night_type_id ? state.nightTypes.find(nt=>nt.id===n.night_type_id)?.name||'—' : '—'}</td>
                   <td><span class="pill pill-registered">${n.status}</span></td>
-                  <td><div style="display:flex;gap:4px"><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewNight('${n.id}')">View →</button>${isAdmin()?`<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteNight('${n.id}')">🗑</button>`:''}</div></td>
+                  <td><div style="display:flex;gap:4px"><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="viewNight('${n.id}')">View →</button>${isAdmin()?`<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--green-accent)" onclick="reopenNight('${n.id}')">Reopen</button><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteNight('${n.id}')">🗑</button>`:''}</div></td>
                 </tr>`).join('')}
               </tbody>
             </table>`}
@@ -3119,12 +3144,15 @@ function renderBlockEntry() {
             <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${nightTypeName} · ${formatDate(night.date)}</div>
             <div style="font-size:0.74rem;color:var(--text-muted);margin-top:6px;max-width:640px;line-height:1.5">
               ${night.viewOnly
-                ? '<strong>View mode:</strong> this night is locked. Contact an admin to make changes.'
+                ? (isAdmin()
+                    ? '<strong>View mode:</strong> this night is locked. Hit <strong style="color:var(--green-accent)">Reopen</strong> to edit blocks or add missing ones, then Submit again.'
+                    : '<strong>View mode:</strong> this night is locked. Contact an admin to make changes.')
                 : 'Choose block size (3–9), assign players to slots, then enter legs + accolades. Save Draft keeps progress without locking the night.'}
             </div>
           </div>
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px">
             <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="backFromNightEntry()">← Back to Nights</button>
+            ${night.viewOnly && isAdmin() ? `<button class="btn btn-primary" style="font-size:0.72rem;padding:5px 10px" onclick="reopenNight('${night.id}')">Reopen Night</button>` : ''}
             ${!night.viewOnly ? `
               <label class="form-label" style="margin:0">Night date</label>
               <input type="date" class="form-input" style="width:auto;font-size:0.72rem;padding:4px 6px" value="${night.date}" onchange="updateNightDate(this.value)">
