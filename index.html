@@ -299,7 +299,7 @@ async function resubmitNight() {
 }
 
 
-const COMP_NIGHT_TYPES = ['Selected Doubles','Mix Doubles','Mixed Triples','Champion of Champions','Home Alone Cup','DIDO','Open Competition'];
+const COMP_NIGHT_TYPES = ['Selected Doubles','Drawn Doubles','Mix Doubles','Mixed Triples','Champion of Champions','Home Alone Cup','DIDO','Open Competition'];
 
 function isCompNight(nightTypeId) {
   const nt = state.nightTypes.find(t => t.id === nightTypeId);
@@ -2271,17 +2271,11 @@ function renderHeader() {
 // ═══════════════════════════════════════════════
 
 function renderHomeCompetitions() {
-  const compNights = getCompNights().filter(n => n.status === 'locked' || n.status === 'submitted');
+  // One column per completed competition, most recent first — nothing collapses/hides.
+  const compNights = getCompNights()
+    .filter(n => n.status === 'locked' || n.status === 'submitted')
+    .slice(0, 12);
   if (!compNights.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No competitions recorded yet.</div>';
-
-  // Group by night type name
-  const byType = {};
-  compNights.forEach(n => {
-    const nt = state.nightTypes.find(t => t.id === n.night_type_id);
-    const name = nt ? nt.name : 'Other';
-    if (!byType[name]) byType[name] = [];
-    byType[name].push(n);
-  });
 
   const medal = (pos) => pos === 1 ? '🥇' : pos === 2 ? '🥈' : '🥉';
 
@@ -2304,17 +2298,13 @@ function renderHomeCompetitions() {
       : '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>';
   };
 
-  const cols = Object.entries(byType).map(([typeName, nights]) => {
-    // Team comps: one column per section (Men / Ladies / …) on the most recent date.
-    if (isTeamComp(nights[0])) {
-      const latestDate = nights[0].date;
-      return nights.filter(n => n.date === latestDate)
-        .map(n => column(`${typeName}${n.notes ? ' · ' + n.notes : ''}`, formatDate(n.date), teamRows(n)))
-        .join('');
-    }
-    // Singles competitions: most recent night only.
-    const latest = nights[0];
-    const body = getCompStandings(latest.id).map(grp => {
+  const cols = compNights.map(n => {
+    const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+    const typeName = nt ? nt.name : 'Competition';
+    const title = `${typeName}${n.notes ? ' · ' + pickerAttr(n.notes) : ''}`;
+    if (isTeamComp(n)) return column(title, formatDate(n.date), teamRows(n));
+    // Singles competition — per-block player standings.
+    const body = getCompStandings(n.id).map(grp => {
       const top3 = grp.players.slice(0, 3);
       return `
           <div style="margin-bottom:8px">
@@ -2328,7 +2318,7 @@ function renderHomeCompetitions() {
             ${!top3.length ? '<div style="font-size:0.72rem;color:var(--text-muted)">No results</div>' : ''}
           </div>`;
     }).join('') || '<div style="font-size:0.72rem;color:var(--text-muted)">No block data</div>';
-    return column(typeName, formatDate(latest.date), body);
+    return column(title, formatDate(n.date), body);
   }).join('');
 
   return `<div style="display:flex;gap:0;min-width:max-content">${cols}</div>`;
