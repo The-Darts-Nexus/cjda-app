@@ -2135,17 +2135,26 @@ function getStandings(category) {
     .sort((a, b) => b.seasonPoints - a.seasonPoints || a.last_name.localeCompare(b.last_name));
 }
 
-function getLegendaryAccolades() {
-  const legendaryTypes = ['180', '171', '170_close', '9_darter'];
+// Per-player accolade tally for the active season (Home "Legendary Accolades" card).
+// Counts 180 / 171 / 170 Close / 9 Darter / High Close, plus each player's best checkout this season.
+function getSeasonAccoladeLeaders() {
   const seasonId = getActiveSeasonId();
-  return state.accolades
-    .filter(a => a.season_id === seasonId && legendaryTypes.includes(a.accolade_type))
-    .map(a => {
-      const player = state.players.find(p => p.id === a.player_id);
-      const night = state.nights.find(n => n.id === a.night_id);
-      return { ...a, playerName: player ? `${player.first_name} ${player.last_name}` : '—', nightDate: night ? night.date : null };
-    })
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const types = ['180', '171', '170_close', '9_darter', 'high_close'];
+  const byPlayer = {};
+  (state.accolades || [])
+    .filter(a => a.season_id === seasonId && types.includes(a.accolade_type))
+    .forEach(a => {
+      const rec = byPlayer[a.player_id] || (byPlayer[a.player_id] = { a180: 0, a171: 0, a170: 0, a9: 0, ahc: 0, best: 0 });
+      if (a.accolade_type === '180') rec.a180++;
+      else if (a.accolade_type === '171') rec.a171++;
+      else if (a.accolade_type === '9_darter') rec.a9++;
+      else if (a.accolade_type === '170_close') { rec.a170++; rec.best = Math.max(rec.best, a.value || 170); }
+      else if (a.accolade_type === 'high_close') { rec.ahc++; rec.best = Math.max(rec.best, a.value || 0); }
+    });
+  return Object.entries(byPlayer).map(([pid, rec]) => {
+    const p = state.players.find(x => x.id === pid);
+    return { name: p ? `${p.first_name} ${p.last_name}` : '—', ...rec, total: rec.a180 + rec.a171 + rec.a170 + rec.a9 + rec.ahc };
+  }).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
 }
 
 function getLastNightResults() {
@@ -2329,7 +2338,7 @@ function renderHome() {
   const menStandings = getStandings('men');
   const ladiesStandings = getStandings('ladies');
   const juniorStandings = [...getStandings('junior_boy'), ...getStandings('junior_girl')].sort((a,b) => b.seasonPoints - a.seasonPoints);
-  const legendary = getLegendaryAccolades();
+  const accLeaders = getSeasonAccoladeLeaders();
   const lastNight = getLastNightResults();
 
   const activeTab = state.activeStandingsTab || 'men';
@@ -2345,25 +2354,30 @@ function renderHome() {
         + '<td style="padding:3px 6px;font-size:0.72rem;color:var(--text-muted)">' + ordinal(i+1) + '</td>'
         + '<td style="padding:3px 6px;font-size:0.78rem;font-weight:600">' + p.first_name + ' ' + p.last_name + '</td>'
         + '<td style="padding:3px 6px;font-size:0.82rem;font-weight:700;color:var(--red);text-align:right">' + (p.seasonPoints||0) + '</td>'
-        + '<td style="padding:3px 6px;font-size:0.72rem;color:var(--text-muted);text-align:right">' + (p.gamesPlayed||0) + '</td>'
+        + '<td style="padding:3px 6px;font-size:0.72rem;color:var(--text-muted);text-align:right">' + (p.selectionPoints||0) + '</td>'
         + '</tr>';
     });
   }
 
-  // Build legendary rows
+  // Build legendary rows — one block per player, most accolades first
+  const accBadge = (label, cls) => '<span class="acc-badge ' + cls + '" style="font-size:0.62rem;padding:1px 7px">' + label + '</span>';
   let legendaryRows = '';
-  if (!legendary.length) {
+  if (!accLeaders.length) {
     legendaryRows = '<div style="text-align:center;color:var(--text-muted);font-size:0.75rem;padding:12px">No legendary accolades yet this season.</div>';
   } else {
-    legendary.forEach(a => {
-      legendaryRows += '<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)">'
-        + '<div style="display:flex;align-items:center;gap:6px">'
-        + '<span class="acc-badge ' + accoladeClass(a.accolade_type) + '">' + accoladeName(a.accolade_type) + '</span>'
-        + '<span style="font-size:0.78rem;font-weight:600">' + a.playerName + '</span>'
-        + '</div>'
-        + '<span style="font-size:0.68rem;color:var(--text-muted)">' + formatDate(a.nightDate) + '</span>'
+    legendaryRows = accLeaders.map(s => {
+      const chips = [];
+      if (s.a180) chips.push(accBadge('180 ×' + s.a180, 'acc-180'));
+      if (s.a171) chips.push(accBadge('171 ×' + s.a171, 'acc-171'));
+      if (s.a170) chips.push(accBadge('170 ×' + s.a170, 'acc-170'));
+      if (s.a9) chips.push(accBadge('9-Dart ×' + s.a9, 'acc-9dart'));
+      if (s.ahc) chips.push(accBadge('H/C ×' + s.ahc, 'acc-170'));
+      if (s.best) chips.push('<span style="font-size:0.64rem;color:var(--text-muted);font-family:\'Share Tech Mono\',monospace">Best ' + s.best + '</span>');
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--border)">'
+        + '<div style="font-size:0.8rem;font-weight:700;color:var(--text);margin-bottom:3px">' + s.name + '</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">' + chips.join('') + '</div>'
         + '</div>';
-    });
+    }).join('');
   }
 
   // Build last night
@@ -2393,8 +2407,8 @@ function renderHome() {
               <thead><tr style="background:var(--green-dark)">
                 <th style="padding:3px 6px;font-size:0.62rem;color:var(--text-muted);text-transform:uppercase">#</th>
                 <th style="padding:3px 6px;font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;text-align:left">Player</th>
-                <th style="padding:3px 6px;font-size:0.62rem;color:var(--red);text-transform:uppercase;text-align:right">Pts</th>
-                <th style="padding:3px 6px;font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;text-align:right">GP</th>
+                <th style="padding:3px 6px;font-size:0.62rem;color:var(--red);text-transform:uppercase;text-align:right">Season</th>
+                <th style="padding:3px 6px;font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;text-align:right">Select</th>
               </tr></thead>
               <tbody>${standingRows}</tbody>
             </table>
@@ -2405,7 +2419,7 @@ function renderHome() {
         <div class="card" style="overflow:hidden;display:flex;flex-direction:column">
           <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border);flex-shrink:0">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">LEGENDARY ACCOLADES</div>
-            <div style="font-size:0.65rem;color:var(--text-muted)">180 · 171 · 170 Close · 9 Darter</div>
+            <div style="font-size:0.65rem;color:var(--text-muted)">Per player · this season · 180 · 171 · 170 · 9-Dart · H/C</div>
           </div>
           <div style="flex:1;overflow-y:auto;padding:8px 12px">
             ${legendaryRows}
