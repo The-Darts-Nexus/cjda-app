@@ -333,9 +333,10 @@ function compTeamName(team) {
   return names.length ? names.join(' & ') : `Team ${team.seed}`;
 }
 function compSessions(nightId) {
-  const s = new Set([1]);
-  compMatchesFor(nightId).forEach(m => s.add(m.session));
-  return [...s].sort((a, b) => a - b);
+  const night = state.nights.find(n => n.id === nightId) || state.activeNight;
+  let max = Math.max(1, (night && night.comp_sessions) || 1);
+  compMatchesFor(nightId).forEach(m => { if (m.session > max) max = m.session; });
+  return Array.from({ length: max }, (_, i) => i + 1);
 }
 
 // Combined standings across all sessions: [{teamId, seed, name, gp, lw, gw, total, pos, bySession}]
@@ -952,7 +953,16 @@ function playerDropdownKey(uid, event) {
 function applyPlayerSelection(uid, optionEl) {
   const dropdown = document.getElementById(uid + '-dropdown');
   const meta = dropdown ? JSON.parse(dropdown.getAttribute('data-picker-meta') || '{}') : {};
-  selectPlayer(uid, optionEl.getAttribute('data-id'), optionEl.getAttribute('data-fullname'), meta.b, meta.r, meta.s);
+  const id = optionEl.getAttribute('data-id');
+  const name = optionEl.getAttribute('data-fullname');
+  if (meta.kind === 'comp') {
+    const input = document.getElementById(uid);
+    if (input) { input.value = name || ''; input.setAttribute('data-selected-name', name || ''); }
+    if (dropdown) dropdown.style.display = 'none';
+    setCompTeamPlayer(meta.seed, meta.idx, id || null);
+    return;
+  }
+  selectPlayer(uid, id, name, meta.b, meta.r, meta.s);
 }
 
 function selectPlayer(uid, playerId, playerName, blockIdx, slotIdx, subSlot) {
@@ -1419,9 +1429,29 @@ async function setCompTeamBonus(seed, val) {
   await loadCompTables(nightId); render();
 }
 
-function addCompSession() {
-  if (!state.activeNight) return;
-  state.compSession = Math.max(...compSessions(state.activeNight.id)) + 1;
+async function addCompSession() {
+  if (!state.activeNight || !isAdmin()) return;
+  const next = (state.activeNight.comp_sessions || 1) + 1;
+  await sb.from('nights').update({ comp_sessions: next }).eq('id', state.activeNight.id);
+  state.activeNight.comp_sessions = next;
+  const nn = state.nights.find(n => n.id === state.activeNight.id);
+  if (nn) nn.comp_sessions = next;
+  state.compSession = next;
+  render();
+}
+
+async function updateCompDates(startVal, endVal) {
+  if (!state.activeNight || !isAdmin()) return;
+  const patch = {};
+  if (startVal && startVal !== state.activeNight.date) patch.date = startVal;
+  if (endVal !== undefined && endVal !== (state.activeNight.end_date || '')) patch.end_date = endVal || null;
+  if (!Object.keys(patch).length) return;
+  const { error } = await sb.from('nights').update(patch).eq('id', state.activeNight.id);
+  if (error) { showToast('Error updating dates: ' + error.message, 'error'); return; }
+  Object.assign(state.activeNight, patch);
+  const nn = state.nights.find(n => n.id === state.activeNight.id);
+  if (nn) Object.assign(nn, patch);
+  showToast('Dates updated');
   render();
 }
 
@@ -1467,11 +1497,12 @@ async function removeCompAccolade(accId) {
 
 async function setCompStatus(status) {
   if (!state.activeNight || !isAdmin()) return;
+  if (status === 'locked' && !confirm('Submit and close off this competition?\n\nIt moves to the Completed list, the winning pair is announced on the Home screen, and the grid becomes read-only. You can Reopen it later if you need to fix results.')) return;
   await sb.from('nights').update({ status }).eq('id', state.activeNight.id);
   state.activeNight.status = status;
   const nn = state.nights.find(n => n.id === state.activeNight.id);
   if (nn) nn.status = status;
-  showToast(status === 'locked' ? 'Competition locked' : 'Competition reopened');
+  showToast(status === 'locked' ? 'Competition submitted' : 'Competition reopened');
   render();
 }
 
@@ -1482,6 +1513,40 @@ function backFromCompEntry() {
   state.compSession = 1;
   state.tab = 'competitions';
   render();
+}
+
+// Searchable player picker for a team-competition roster slot.
+// Selection is routed through applyPlayerSelection's meta.kind === 'comp' branch → setCompTeamPlayer.
+function compPlayerPicker(seed, idx, curId, disabled) {
+  const uid = `comp-player-${seed}-${idx}`;
+  const sel = curId ? state.players.find(p => p.id === curId) : null;
+  const dn = pickerAttr(sel ? `${sel.first_name} ${sel.last_name}` : '');
+  const options = (state.players || []).slice()
+    .sort((a, z) => (a.first_name + a.last_name).localeCompare(z.first_name + z.last_name))
+    .map(p => {
+      const full = `${p.first_name} ${p.last_name}`;
+      return `<div data-player-option data-id="${p.id}" data-fullname="${pickerAttr(full)}" data-name="${pickerAttr(full.toLowerCase())}"
+        style="padding:6px 8px;cursor:pointer;font-size:0.72rem;color:var(--text);border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+        onmouseover="this.style.background='var(--green-dark)';this.style.color='#fff'"
+        onmouseout="this.style.background='transparent';this.style.color='var(--text)'">${pickerAttr(full)}</div>`;
+    }).join('');
+  const clearRow = curId
+    ? `<div data-player-option data-id="" data-fullname="" data-name=""
+        style="padding:6px 8px;cursor:pointer;font-size:0.72rem;color:var(--text-muted);border-bottom:1px solid var(--border);font-style:italic"
+        onmouseover="this.style.background='var(--green-dark)';this.style.color='#fff'"
+        onmouseout="this.style.background='transparent';this.style.color='var(--text-muted)'">— Clear —</div>`
+    : '';
+  return `<div class="player-search-wrap" style="position:relative;flex:1;min-width:120px;max-width:180px">
+    <input type="text" class="player-search-input" id="${uid}" placeholder="Player ${idx + 1}" value="${dn}"
+      data-selected-name="${dn}" autocomplete="off" ${disabled ? 'disabled' : ''}
+      style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:0.72rem"
+      onclick="openPlayerDropdown('${uid}')" oninput="filterPlayerDropdown('${uid}')" onkeydown="playerDropdownKey('${uid}',event)">
+    <div class="player-search-dropdown" id="${uid}-dropdown" data-picker-meta='{"kind":"comp","seed":${seed},"idx":${idx}}'
+      style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:4px;max-height:220px;overflow-y:auto;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.35)">
+      ${clearRow}${options}
+      <div data-player-nomatch style="display:none;padding:6px 8px;font-size:0.72rem;color:var(--text-muted)">No players found</div>
+    </div>
+  </div>`;
 }
 
 function renderDoublesComp() {
@@ -1517,37 +1582,54 @@ function renderDoublesComp() {
     return { lw, gw };
   };
 
+  const dateText = night.end_date ? fmtGdfDate(night.date, night.end_date) : formatDate(night.date);
+  const dateEditor = (admin && !locked) ? `
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+          <label style="font-size:0.64rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">Start date
+            <input type="date" id="comp-start-date" value="${night.date || ''}"
+              onchange="updateCompDates(this.value, document.getElementById('comp-end-date').value)"
+              style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 6px">
+          </label>
+          <label style="font-size:0.64rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">End date <span style="opacity:0.6">(optional)</span>
+            <input type="date" id="comp-end-date" value="${night.end_date || ''}" min="${night.date || ''}"
+              onchange="updateCompDates(document.getElementById('comp-start-date').value, this.value)"
+              style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 6px">
+          </label>
+        </div>` : '';
+
   const header = `
     <div class="card" style="padding:14px">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div>
           <h2 style="font-size:1.15rem;letter-spacing:0.08em;color:var(--text)">${ntName}${night.notes ? ' — ' + pickerAttr(night.notes) : ''}</h2>
-          <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${formatDate(night.date)} · team round-robin · ${teams.length} team${teams.length !== 1 ? 's' : ''}${locked ? ' · locked' : ''}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${dateText} · team round-robin · ${teams.length} team${teams.length !== 1 ? 's' : ''}${locked ? ' · submitted' : ''}</div>
+          ${dateEditor}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="backFromCompEntry()">← Back</button>
           ${admin ? (locked
             ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px" onclick="setCompStatus('draft')">Reopen</button>`
-            : `<button class="btn btn-primary" style="font-size:0.72rem;padding:5px 10px" onclick="setCompStatus('locked')">Lock competition</button>`) : ''}
+            : `<button class="btn btn-primary" style="font-size:0.72rem;padding:5px 10px" onclick="setCompStatus('locked')">Submit Competition</button>`) : ''}
         </div>
       </div>
     </div>`;
 
   const roster = !admin ? '' : `
     <div class="card" style="padding:14px">
-      <div class="form-label" style="margin-bottom:8px">Teams</div>
-      <div style="display:flex;flex-direction:column;gap:6px">
+      <div class="form-label" style="margin-bottom:8px">Teams <span style="font-weight:400;text-transform:none;color:var(--text-muted)">— the team name is the players' first names</span></div>
+      <div style="display:flex;flex-direction:column;gap:8px">
         ${teams.map(t => `
-          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-            <span style="font-size:0.7rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;width:52px">Team ${t.seed}</span>
-            ${Array.from({ length: pps }, (_, i) => `
-              <select ${hasResults ? 'disabled' : ''} onchange="setCompTeamPlayer(${t.seed},${i},this.value)" style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.72rem;padding:3px 5px;max-width:150px">
-                ${playerOpts([t.player1_id, t.player2_id, t.player3_id][i])}
-              </select>`).join('')}
-            <label style="font-size:0.64rem;color:var(--text-muted);display:flex;align-items:center;gap:3px">Bonus
-              <input type="number" min="0" value="${t.bonus || 0}" onchange="setCompTeamBonus(${t.seed},this.value)" style="width:34px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.7rem">
-            </label>
-            ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.6rem;padding:2px 7px;color:var(--red)" onclick="removeCompTeam(${t.seed})">×</button>` : ''}
+          <div style="display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--card2);border:1px solid var(--border);border-radius:6px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <span style="font-size:0.82rem;font-weight:700;color:var(--green-accent)">${t.seed}. ${pickerAttr(compTeamName(t))}</span>
+              ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.6rem;padding:2px 8px;color:var(--red)" onclick="removeCompTeam(${t.seed})">Remove</button>` : ''}
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap">
+              ${Array.from({ length: pps }, (_, i) => compPlayerPicker(t.seed, i, [t.player1_id, t.player2_id, t.player3_id][i], hasResults)).join('')}
+              <label style="font-size:0.62rem;color:var(--text-muted);display:flex;flex-direction:column;gap:2px">Bonus
+                <input type="number" min="0" value="${t.bonus || 0}" onchange="setCompTeamBonus(${t.seed},this.value)" style="width:44px;background:var(--card);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.72rem;padding:3px 4px">
+              </label>
+            </div>
           </div>`).join('') || '<div style="font-size:0.72rem;color:var(--text-muted)">No teams yet.</div>'}
       </div>
       ${!hasResults ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:5px 10px;margin-top:8px" onclick="addCompTeam()">+ Add Team</button>` : ''}
@@ -1588,9 +1670,15 @@ function renderDoublesComp() {
       </table>
     </div>`;
 
+  const champTeam = (standings.length && standings[0].gp) ? standings[0] : null;
+  const champBanner = (champTeam && locked)
+    ? `<div style="margin-bottom:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 WINNERS — ${pickerAttr(champTeam.name)}</div>`
+    : '';
+
   const standingsTable = !standings.length ? '' : `
     <div class="card" style="padding:14px">
       <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:0.1em;color:var(--green-accent);font-weight:700;text-transform:uppercase;margin-bottom:8px">Standings</div>
+      ${champBanner}
       <div style="overflow-x:auto">
         <table class="block-sheet">
           <thead><tr>
@@ -1601,7 +1689,7 @@ function renderDoublesComp() {
           <tbody>
             ${standings.map(r => `<tr>
               <td style="text-align:center;font-weight:700;color:var(--green-accent)">${r.pos}</td>
-              <td style="text-align:left;white-space:nowrap;font-weight:600">${pickerAttr(r.name)}</td>
+              <td style="text-align:left;white-space:nowrap;font-weight:600">${(r.pos === 1 && r.gp && locked) ? '🏆 ' : ''}${pickerAttr(r.name)}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.gp}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.lw}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.gw}</td>
@@ -1637,6 +1725,11 @@ function renderDoublesComp() {
         </div>` : ''}
     </div>`;
 
+  const footerNote = !admin ? '' : `
+    <div style="font-size:0.68rem;color:var(--text-muted);line-height:1.55;padding:2px 2px 0">
+      <strong style="color:var(--text)">Submit Competition</strong> closes it off — it moves from Draft to the Completed list on the Competitions tab, the winning pair is announced on the Home screen, and the grid becomes read-only. Hit <strong style="color:var(--text)">Reopen</strong> if you need to fix a result afterwards. Player accolades still count toward season stats either way.
+    </div>`;
+
   return `
     <div style="padding:16px;display:flex;flex-direction:column;gap:14px;max-width:1400px;margin:0 auto">
       ${header}
@@ -1647,6 +1740,7 @@ function renderDoublesComp() {
       </div>
       ${standingsTable}
       ${accList}
+      ${footerNote}
     </div>`;
 }
 
@@ -2315,6 +2409,29 @@ function renderHome() {
       </div>`;
       })()}
 
+      ${(() => {
+        const champs = getDoublesChampions().slice(0, 6);
+        if (!champs.length) return '';
+        return `
+      <!-- Team-competition Champions -->
+      <div class="card" style="overflow:hidden">
+        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">🏆 DOUBLES CHAMPIONS</div>
+          <div style="font-size:0.65rem;color:var(--text-muted)">Winning pair of each team competition</div>
+        </div>
+        <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
+          ${champs.map(c => `
+            <div class="card2" style="padding:6px 12px;display:flex;align-items:center;gap:8px">
+              <span style="font-size:0.9rem">🏆</span>
+              <div>
+                <div style="font-size:0.8rem;font-weight:700;color:var(--green-accent)">${c.name}</div>
+                <div style="font-size:0.62rem;color:var(--text-muted)">${c.label ? c.label + ' · ' : ''}${formatDate(c.date)}</div>
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>`;
+      })()}
+
       <!-- Competition Results -->
       <div class="card" style="overflow:hidden">
         <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
@@ -2327,6 +2444,18 @@ function renderHome() {
       </div>
 
     </div>`;
+}
+
+// Most-recent-first list of team-competition winners: {name, label, date, nightId}
+function getDoublesChampions() {
+  return (state.nights || [])
+    .filter(n => isTeamComp(n) && (n.status === 'locked' || n.status === 'submitted'))
+    .map(n => {
+      const w = getDoublesWinner(n.id);
+      return w ? { name: w, label: n.notes || '', date: n.date, nightId: n.id } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 // Most-recent-first list of DIDO playoff winners: {name, date, nightId, playerId}
