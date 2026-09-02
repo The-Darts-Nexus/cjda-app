@@ -995,12 +995,15 @@ function nightMatchLegs(nightTypeId) {
   return /dido/i.test((nt && nt.name) || '') ? 1 : 3;
 }
 
-function legColor(val, matchLegs) {
-  const v = parseInt(val) || 0;
-  const w = matchLegs || 3;
-  if (v === 0) return 'rgba(204,0,0,0.25)';
-  if (v * 2 > w) return 'rgba(45,106,45,0.4)';  // winning majority of legs
-  return 'rgba(255,140,0,0.3)';                 // legs on the board, not the winner
+// Block leg-cell conditional formatting — colour by legs value:
+// 0 = red · 1 = yellow · 2 = green · 3+ = purple
+function legColor(val) {
+  switch (parseInt(val) || 0) {
+    case 0:  return 'rgba(204,0,0,0.34)';    // red
+    case 1:  return 'rgba(230,190,0,0.30)';  // yellow
+    case 2:  return 'rgba(92,187,92,0.32)';  // green
+    default: return 'rgba(160,90,210,0.40)'; // purple (3+)
+  }
 }
 
 function updateLeg(blockIdx, row, col, val) {
@@ -3017,7 +3020,7 @@ function renderBlockEntry() {
     const legCells = Array.from({length: N}, (_, c) => {
       if (c === r) return `<td style="background:#1A1A1A;width:32px"></td>`;
       const val = b.legs[r][c] || 0;
-      const lc = legColor(val, matchLegs);
+      const lc = legColor(val);
       return `<td style="padding:1px;text-align:center;background:${lc};transition:background 0.15s">
         <input type="number" min="0" max="${matchLegs}" value="${val}"
           style="width:34px;background:transparent;border:none;color:var(--text);text-align:center;padding:3px 2px;font-size:0.9rem;font-family:'Share Tech Mono',monospace;font-weight:700"
@@ -3168,6 +3171,12 @@ function renderBlockEntry() {
       <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.6">
         Enter legs in the matrix (row player vs column player). Black diagonal cells are N/A.
         Total = Legs Won + (Games Won &times; 2) + Block Bonus. Accolades are added to the Season Log only when you Submit.
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;align-items:center">
+          <span style="font-weight:600;color:var(--text)">Leg colours:</span>
+          ${[['0', legColor(0)], ['1', legColor(1)], ['2', legColor(2)], ['3', legColor(3)]].map(([n, c]) =>
+            `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:13px;height:13px;border:1px solid var(--border);border-radius:3px;background:${c};display:inline-block"></span>${n}</span>`
+          ).join('')}
+        </div>
       </div>
 
       ${renderRoundsLookup(state.activeBlockIdx)}
