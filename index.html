@@ -128,7 +128,8 @@
 const SUPABASE_URL = 'https://zsynlrutfkdjmmyznhst.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzeW5scnV0Zmtkam1teXpuaHN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyNDIwNjYsImV4cCI6MjA5MzgxODA2Nn0.HsqkrKMFYeDouuX3cZkufRu1oFI6-0kI-YjBq1TUjcE';
 const SPACE_ID = '00ca89b5-86f4-4c46-b853-0503796769de';
-const ADMIN_EMAILS = ['alexander.kloppers93@gmail.com', 'fishontackle13@gmail.com', 'dartsnexus@outlook.com'];
+const ADMIN_EMAILS = ['alexander.kloppers93@gmail.com', 'fishontackle13@gmail.com', 'dartsnexus@outlook.com', 'wynandcarelse123@gmail.com'];
+function isAdminEmail(email) { return !!email && ADMIN_EMAILS.includes(String(email).trim().toLowerCase()); }
 
 // Initialise Supabase
 const { createClient } = supabase;
@@ -214,7 +215,7 @@ async function signIn() {
   state.loading = false;
   if (error) { showToast(error.message, 'error'); render(); return; }
   state.user = data.user;
-  state.role = ADMIN_EMAILS.includes(data.user.email) ? 'admin' : 'viewer';
+  state.role = isAdminEmail(data.user.email) ? 'admin' : 'viewer';
   await loadAllData();
   render();
 }
@@ -873,11 +874,22 @@ function setBlockSize(blockIdx, size) {
   render();
 }
 
+// A block slot holds a scalar player id for singles, or an array of ids for team formats.
+function slotPlayerId(slot) {
+  if (Array.isArray(slot)) return slot.find(Boolean) || null;
+  return slot || null;
+}
+
 function setBlockSlot(blockIdx, slotIdx, subSlot, playerId) {
-  if (!Array.isArray(state.nightBlocks[blockIdx].slots[slotIdx])) {
-    state.nightBlocks[blockIdx].slots[slotIdx] = [];
+  const b = state.nightBlocks[blockIdx];
+  const pps = getPlayersPerSlot(b.format || 'singles');
+  if (pps <= 1) {
+    // singles — keep the slot a scalar id so DB writes stay clean
+    b.slots[slotIdx] = playerId || null;
+  } else {
+    if (!Array.isArray(b.slots[slotIdx])) b.slots[slotIdx] = [];
+    b.slots[slotIdx][subSlot] = playerId || null;
   }
-  state.nightBlocks[blockIdx].slots[slotIdx][subSlot] = playerId || null;
   render();
 }
 
@@ -1831,14 +1843,16 @@ async function writeNightBlocks(blockStatus) {
     const resultInserts = [];
     for (let r = 0; r < b.size; r++) {
       for (let c = r + 1; c < b.size; c++) {
-        if (!b.slots[r] || !b.slots[c]) continue;
+        const homePid = slotPlayerId(b.slots[r]);
+        const awayPid = slotPlayerId(b.slots[c]);
+        if (!homePid || !awayPid) continue;
         resultInserts.push({
           space_id: SPACE_ID,
           block_id: blockData.id,
           night_id: state.activeNight.id,
           season_id: seasonId,
-          home_player_id: b.slots[r],
-          away_player_id: b.slots[c],
+          home_player_id: homePid,
+          away_player_id: awayPid,
           home_legs: b.legs[r][c] || 0,
           away_legs: b.legs[c][r] || 0
         });
@@ -1852,7 +1866,7 @@ async function writeNightBlocks(blockStatus) {
     // Insert accolades
     const accInserts = [];
     b.accolades.forEach((acc, slotIdx) => {
-      const pid = b.slots[slotIdx];
+      const pid = slotPlayerId(b.slots[slotIdx]);
       if (!pid) return;
       if (acc['180'] > 0) for (let i = 0; i < acc['180']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '180', value: 1 });
       if (acc['171'] > 0) for (let i = 0; i < acc['171']; i++) accInserts.push({ space_id: SPACE_ID, player_id: pid, night_id: state.activeNight.id, season_id: seasonId, accolade_type: '171', value: 1 });
@@ -3649,7 +3663,7 @@ function restoreAssistantUI() {
   const { data: { session } } = await sb.auth.getSession();
   if (session?.user) {
     state.user = session.user;
-    state.role = ADMIN_EMAILS.includes(session.user.email) ? 'admin' : 'viewer';
+    state.role = isAdminEmail(session.user.email) ? 'admin' : 'viewer';
     await loadAllData();
   }
   render();
