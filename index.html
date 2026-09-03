@@ -410,53 +410,72 @@ function fmtGdfDate(startStr, endStr) {
   return sd + ' ' + sm + ' - ' + ed + ' ' + em;
 }
 
+// Event-centric attendance list: one card per GDF event (newest first) with its attendees
+// as removable name chips + an "add attendee" picker for admins.
 function renderGdfCalendar() {
-  if (!state.gdfEvents || !state.gdfEvents.length) {
-    return '<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.78rem">No GDF events recorded yet. Admin can add events via the + Add Event button.</div>';
+  const events = (state.gdfEvents || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  if (!events.length) {
+    return `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.78rem">No GDF events yet.${isAdmin() ? ' Use <strong>+ Add Event</strong> above to create one.' : ''}</div>`;
   }
-  const players = state.players.filter(p => p.status === 'registered').sort((a,b) => a.last_name.localeCompare(b.last_name));
-  const events = state.gdfEvents;
-  let headerCells = '';
-  events.forEach(e => {
-    headerCells += '<th style="padding:5px 8px;text-align:center;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);white-space:nowrap;min-width:70px;vertical-align:bottom">'
-      + '<div style="font-weight:700;color:var(--text);font-size:0.68rem;margin-bottom:2px">' + e.name + '</div>'
-      + '<div style="color:var(--green-accent);font-family:\'Share Tech Mono\',monospace;font-size:0.65rem">' + fmtGdfDate(e.date, e.end_date) + '</div>'
-      + '</th>';
-  });
+  const admin = isAdmin();
+  const pname = (p) => (p.first_name + ' ' + (p.last_name || '')).trim();
+  const byName = (a, b) => pname(a).localeCompare(pname(b));
+  const allPlayers = (state.players || []).slice().sort(byName);
 
-  let rows = '';
-  players.forEach((p, i) => {
-    let cells = '';
-    let total = 0;
-    events.forEach(e => {
-      const attended = (state.gdfAttendance || []).some(a => a.event_id === e.id && a.player_id === p.id);
-      if (attended) total++;
-      if (isAdmin()) {
-        cells += '<td style="padding:4px;text-align:center;border-bottom:1px solid var(--border)">'
-          + '<input type="checkbox" ' + (attended?'checked':'') + ' onchange="toggleGdfAttendance(\'' + e.id + '\',\'' + p.id + '\',this.checked)" style="width:16px;height:16px;cursor:pointer">'
-          + '</td>';
-      } else {
-        cells += '<td style="padding:4px;text-align:center;border-bottom:1px solid var(--border);color:' + (attended?'var(--green-accent)':'var(--text-muted)') + '">'
-          + (attended?'✓':'—') + '</td>';
-      }
-    });
-    rows += '<tr style="' + (i%2===0?'':'background:rgba(45,106,45,0.05)') + '">'
-      + '<td style="padding:4px 8px;font-weight:600;font-size:0.75rem;white-space:nowrap;border-bottom:1px solid var(--border);position:sticky;left:0;z-index:1;background:' + (i%2===0?'var(--card)':'rgba(28,58,28,0.95)') + '">' + p.first_name + ' ' + p.last_name + '</td>'
-      + cells
-      + '<td style="padding:4px 8px;text-align:center;font-weight:700;color:var(--green-accent);border-bottom:1px solid var(--border);position:sticky;right:0;z-index:1;background:' + (i%2===0?'var(--card)':'rgba(28,58,28,0.95)') + '">' + total + '</td>'
-      + '</tr>';
-  });
+  const typePill = (t) => {
+    const map = {
+      johannesburg: ['Johannesburg', 'rgba(45,106,45,0.3)', 'var(--green-accent)'],
+      gauteng: ['Gauteng', 'rgba(255,165,0,0.2)', '#FFA500'],
+    };
+    const [label, bg, fg] = map[t] || [(t || 'GDF'), 'rgba(45,106,45,0.2)', 'var(--text-muted)'];
+    return `<span class="pill" style="background:${bg};color:${fg};border:1px solid var(--border)">${label}</span>`;
+  };
 
-  return '<div style="overflow-x:auto">'
-    + '<table style="border-collapse:collapse;font-size:0.75rem">'
-    + '<thead><tr style="background:var(--green-dark)">'
-    + '<th style="padding:4px 8px;text-align:left;color:var(--text-muted);font-size:0.65rem;border-bottom:1px solid var(--border);position:sticky;left:0;z-index:2;background:var(--green-dark);white-space:nowrap;min-width:140px">Player</th>'
-    + headerCells
-    + '<th style="padding:4px 8px;text-align:center;color:var(--green-accent);font-size:0.65rem;border-bottom:1px solid var(--border);position:sticky;right:0;z-index:2;background:var(--green-dark)">Total</th>'
-    + '</tr></thead>'
-    + '<tbody>' + rows + '</tbody>'
-    + '</table>'
-    + '</div>';
+  const cards = events.map(e => {
+    const attendeeIds = (state.gdfAttendance || []).filter(a => a.event_id === e.id).map(a => a.player_id);
+    const attendees = attendeeIds.map(id => state.players.find(p => p.id === id)).filter(Boolean).sort(byName);
+    const year = e.date ? new Date(e.date + 'T00:00:00').getFullYear() : '';
+
+    const chips = attendees.length
+      ? attendees.map(p => `
+          <span style="display:inline-flex;align-items:center;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:3px 6px 3px 10px;font-size:0.74rem;color:var(--text)">
+            ${pname(p)}${p.status === 'temp' ? ' <span style="color:var(--text-muted);font-size:0.66rem">(temp)</span>' : ''}
+            ${admin ? `<button onclick="toggleGdfAttendance('${e.id}','${p.id}',false)" title="Remove"
+              style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:0.9rem;line-height:1;padding:0 2px">&times;</button>` : ''}
+          </span>`).join('')
+      : `<span style="font-size:0.74rem;color:var(--text-muted);font-style:italic">No attendance recorded${admin ? ' yet' : ''}.</span>`;
+
+    const addControl = admin ? `
+      <div style="margin-top:8px">
+        <select class="form-input form-select" style="max-width:280px;font-size:0.78rem"
+          onchange="if(this.value){toggleGdfAttendance('${e.id}',this.value,true);this.value='';}">
+          <option value="">+ Add attendee…</option>
+          ${allPlayers.filter(p => !attendeeIds.includes(p.id))
+            .map(p => `<option value="${p.id}">${pname(p)}${p.status === 'temp' ? ' (temp)' : ''}</option>`).join('')}
+        </select>
+      </div>` : '';
+
+    return `
+      <div class="card2" style="padding:10px 12px">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div>
+            <div style="font-weight:700;font-size:0.9rem;color:var(--text)">${e.name}</div>
+            <div style="font-size:0.72rem;color:var(--green-accent);font-family:'Share Tech Mono',monospace;margin-top:1px">${fmtGdfDate(e.date, e.end_date)}${year ? ' ' + year : ''}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${typePill(e.event_type)}
+            ${admin ? `<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem;color:var(--red)" onclick="deleteGdfEvent('${e.id}')" title="Delete event">🗑</button>` : ''}
+          </div>
+        </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+          <div style="font-size:0.66rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px">Attended · ${attendees.length}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${chips}</div>
+          ${addControl}
+        </div>
+      </div>`;
+  }).join('');
+
+  return `<div style="display:flex;flex-direction:column;gap:8px;padding:4px">${cards}</div>`;
 }
 
 async function toggleGdfAttendance(eventId, playerId, attended) {
@@ -512,17 +531,33 @@ async function setNightAttendanceBulk(playerIds, present) {
 
 function openAddGdfEvent() {
   const today = new Date().toISOString().split('T')[0];
-  state.modal = { mode: 'add_gdf_event', data: { name:'', date: today, event_type:'johannesburg' } };
+  state.modal = { mode: 'add_gdf_event', data: { name:'', date: today, end_date:'', event_type:'johannesburg' } };
   render();
 }
 
 async function saveGdfEvent() {
   const d = state.modal.data;
   if (!d.name || !d.date) { showToast('Name and date required','error'); return; }
-  const { error } = await sb.from('gdf_events').insert({ space_id: SPACE_ID, name: d.name, date: d.date, event_type: d.event_type });
+  const { error } = await sb.from('gdf_events').insert({
+    space_id: SPACE_ID, name: d.name, date: d.date,
+    end_date: (d.end_date && d.end_date >= d.date) ? d.end_date : null,
+    event_type: d.event_type
+  });
   if (error) { showToast(error.message,'error'); return; }
   showToast('GDF Event added');
   state.modal = null;
+  await loadAllData();
+}
+
+async function deleteGdfEvent(eventId) {
+  if (!isAdmin()) return;
+  const ev = (state.gdfEvents || []).find(e => e.id === eventId);
+  if (!confirm(`Delete "${ev ? ev.name : 'this event'}" and all its attendance records?`)) return;
+  const { error } = await sb.from('gdf_attendance').delete().eq('event_id', eventId);
+  if (error) { showToast(error.message,'error'); return; }
+  const { error: e2 } = await sb.from('gdf_events').delete().eq('id', eventId);
+  if (e2) { showToast(e2.message,'error'); return; }
+  showToast('Event deleted');
   await loadAllData();
 }
 
@@ -3596,9 +3631,15 @@ function renderModal() {
             <label class="form-label">Event Name *</label>
             <input class="form-input" value="${d.name||''}" oninput="updateModalField('name',this.value)" placeholder="e.g. JHB Open 2026">
           </div>
-          <div>
-            <label class="form-label">Date *</label>
-            <input class="form-input" type="date" value="${d.date}" oninput="updateModalField('date',this.value)">
+          <div style="display:flex;gap:10px">
+            <div style="flex:1">
+              <label class="form-label">Start Date *</label>
+              <input class="form-input" type="date" value="${d.date}" oninput="updateModalField('date',this.value)">
+            </div>
+            <div style="flex:1">
+              <label class="form-label">End Date</label>
+              <input class="form-input" type="date" value="${d.end_date||''}" min="${d.date||''}" oninput="updateModalField('end_date',this.value)">
+            </div>
           </div>
           <div>
             <label class="form-label">Event Type</label>
