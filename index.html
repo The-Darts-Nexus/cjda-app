@@ -128,7 +128,9 @@
 const SUPABASE_URL = 'https://zsynlrutfkdjmmyznhst.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzeW5scnV0Zmtkam1teXpuaHN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyNDIwNjYsImV4cCI6MjA5MzgxODA2Nn0.HsqkrKMFYeDouuX3cZkufRu1oFI6-0kI-YjBq1TUjcE';
 const SPACE_ID = '00ca89b5-86f4-4c46-b853-0503796769de';
-const ADMIN_EMAILS = ['alexander.kloppers93@gmail.com', 'fishontackle13@gmail.com', 'dartsnexus@outlook.com', 'wynandcarelse123@gmail.com'];
+// CJDA admins only. Mirrors the is_space_admin() email allowlist for the CJDA space.
+// (fishontackle13 is a Key West admin — different space — and must NOT be here.)
+const ADMIN_EMAILS = ['alexander.kloppers93@gmail.com', 'wynandcarelse123@gmail.com', 'dartsnexus@outlook.com'];
 function isAdminEmail(email) { return !!email && ADMIN_EMAILS.includes(String(email).trim().toLowerCase()); }
 
 // Initialise Supabase
@@ -227,13 +229,15 @@ async function resolveIdentity() {
   if (!state.user) { state.role = 'guest'; return; }
   let admin = isAdminEmail(state.user.email);
   if (!admin) {
-    try { const { data } = await sb.rpc('is_app_admin'); admin = data === true; } catch (e) { /* ignore */ }
+    try { const { data } = await sb.rpc('is_space_admin', { p_space_id: SPACE_ID }); admin = data === true; } catch (e) { /* ignore */ }
   }
-  // Resolve a linked player row for everyone — admins can be players too.
+  // Resolve a linked player row for everyone (admins can be players too) — scoped to this space,
+  // because auth.users is shared platform-wide with Key West and other clubs.
   try {
-    let { data: linked } = await sb.from('players').select('id').eq('auth_user_id', state.user.id).maybeSingle();
+    let { data: linked } = await sb.from('players').select('id')
+      .eq('auth_user_id', state.user.id).eq('space_id', SPACE_ID).maybeSingle();
     if (!linked) {
-      const { data: fresh, error } = await sb.rpc('link_my_player');
+      const { data: fresh, error } = await sb.rpc('link_my_player', { p_space_id: SPACE_ID });
       if (!error && fresh) linked = Array.isArray(fresh) ? fresh[0] : fresh;
     }
     if (linked && linked.id) state.myPlayerId = linked.id;
@@ -258,10 +262,10 @@ async function signUp() {
   if (!email || !state.authPassword) { showToast('Enter your email and a password (min 6 characters)', 'error'); return; }
   state.loading = true; render();
   const { data: match } = await sb.from('players')
-    .select('id, first_name').ilike('email', email).is('auth_user_id', null).maybeSingle();
+    .select('id, first_name').eq('space_id', SPACE_ID).ilike('email', email).is('auth_user_id', null).maybeSingle();
   if (!match) {
     state.loading = false;
-    showToast('That email is not on the register yet — ask the Tournament Director to add it to your player profile.', 'error');
+    showToast('That email is not on the CJDA register yet — ask the Tournament Director to add it to your player profile.', 'error');
     render(); return;
   }
   const { error } = await sb.auth.signUp({ email: (state.authEmail || '').trim(), password: state.authPassword });

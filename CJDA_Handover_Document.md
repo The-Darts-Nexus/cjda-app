@@ -25,6 +25,15 @@ database (`spaces`, `hub_settings`, `subscriptions`, `revenue`, `opens_*`, `team
 `competitions`, `activity_logs`, `app_state`, …). **The CJDA app does not read or write
 those** — ignore them unless working on the platform itself.
 
+**Multi-tenant caveat:** every CJDA table (`players`, `nights`, `results`, …) is CJDA-only
+data (all rows `space_id = 00ca89b5-…`); other clubs like **Key West** have their own schema
+(the `app_state` jsonb-blob pattern). BUT `auth.users` is **shared platform-wide** — one
+login can belong to several apps. So admin identity and player-linking are **space-scoped**:
+`app_admins` is keyed `(user_id, space_id)`, `is_space_admin(space_id)` is what the RLS
+policies call, and `link_my_player(p_space_id)` / `signUp()` only match `players` rows in the
+CJDA space. `fishontackle13@gmail.com` is a **Key West** admin and must never appear in CJDA's
+`app_admins` or `ADMIN_EMAILS`.
+
 ---
 
 ## 14.1 Repository / File Structure
@@ -129,10 +138,11 @@ All CJDA tables carry `space_id` (always `SPACE_ID`) + `created_at`. RLS: see §
 `base_career_171s`, `base_career_170s`, `base_career_hc_count`.
 The `base_*` columns are pre-app career totals folded into the calculated figures.
 
-**`app_admins`** — `user_id` (PK, = `auth.users.id`). The DB source of truth for who is an
-admin. Read policy: authenticated. **No write policy** — changed only via SQL / service role.
-`is_app_admin()` also honours a hard-coded email allowlist so a fresh admin works before they're
-seeded.
+**`app_admins`** — `(user_id, space_id)` PK. The DB source of truth for who administers which
+space. Read policy: authenticated. **No write policy** — changed only via SQL / service role.
+CJDA rows: Alexander (superadmin), Wynie (TD), dartsnexus@outlook.com (platform).
+`is_space_admin(space_id)` also honours a hard-coded CJDA email allowlist (same three) so a
+fresh admin works before being seeded.
 
 **`seasons`** — `name`*, `start_date`*, `end_date`, `is_active`, plus **two independent date
 ranges**: `season_points_start/end` (prize-giving) and `selection_points_start/end`
@@ -315,10 +325,12 @@ Outright winners only: winning `comp_teams` row of a locked team comp (from
 - **`resolveIdentity()`** (client) — after auth: admin? (`is_app_admin` RPC or `ADMIN_EMAILS`).
   Then find the linked `players` row (`auth_user_id = auth.uid()`), or `link_my_player()` to
   link by email. Sets `state.role` + `state.myPlayerId`.
-- **`is_app_admin()`** — `exists(app_admins where user_id = auth.uid())` OR email in a hard-coded
-  allowlist. Used by every table's write policy.
-- **`link_my_player()`** — one-time: links the caller to an unclaimed `players` row whose
-  `email` matches the JWT email. Raises `NO_PLAYER_FOR_EMAIL` if none.
+- **`is_space_admin(p_space_id)`** — `exists(app_admins where user_id = auth.uid() and space_id
+  = p_space_id)` OR (CJDA space + email in the hard-coded allowlist). Every CJDA write policy is
+  `USING (is_space_admin(space_id))` — a CJDA admin can only write CJDA rows. `is_app_admin()`
+  is a back-compat wrapper = `is_space_admin('00ca89b5-…')`.
+- **`link_my_player(p_space_id)`** — one-time: links the caller to an unclaimed `players` row
+  **in that space** whose `email` matches the JWT email. Raises `NO_PLAYER_FOR_EMAIL` if none.
 - **`save_my_profile(patch jsonb)`** — updates **only** `nickname / phone / email / dart_brand /
   dart_model / dart_weight_g / dart_notes` on the caller's own row. A key absent from `patch` is
   left unchanged; an empty-string value clears it. Never category / status / DSA / name / points.
@@ -352,13 +364,14 @@ Do not change without written approval — each drives multiple engines.
 10. **Standings and the Season Log are always recomputed, never stored.**
 11. **Slot model:** a block slot is a scalar player-id for singles and an array for team
     formats. Always read it through `slotPlayerId()`.
-12. **Writes are DB-enforced admin-only.** Every CJDA table: `Public read` (anon SELECT) +
-    `<table> admin write` (`FOR ALL TO authenticated USING (is_app_admin())`). `anon` has no
-    write grant at all. A **player** can change nothing except the seven self-service fields on
-    **their own** `players` row, and only through `save_my_profile()` / `set_my_photo()`
+12. **Writes are DB-enforced, admin-only, and space-scoped.** Every CJDA table: `Public read`
+    (anon SELECT) + `<table> admin write` (`USING (is_space_admin(space_id))`). `anon` has no
+    write grant at all. A CJDA admin can only write CJDA rows; a Key West / other-space admin
+    gets 0 rows. A **player** can change nothing except the seven self-service fields on
+    **their own** `players` row, only through `save_my_profile()` / `set_my_photo()`
     (`SECURITY DEFINER`, keyed on `auth.uid()`). The `player-photos` bucket write policy
-    likewise restricts a non-admin to their own `{playerId}.jpg`. The client role checks
-    (`isAdmin`, `canEditProfile`) are the UX layer; the DB is the real gate.
+    restricts a non-admin to their own `{playerId}.jpg`. Client role checks (`isAdmin`,
+    `isPlayer`, `canEditProfile`) are the UX layer; the DB is the real gate.
     (Platform tables outside CJDA — `opens_*`, `accolades_config`, `space_accolades` — still
     carry the old blanket `Auth write` policies; out of scope here.)
 13. **Attribution email** `Alexander.Kloppers@outlook.com` is for commit authorship only.
@@ -463,6 +476,16 @@ renders name/DSA/category/status read-only for a player editing their own. Migra
 for the storage policy. Verified: anon = no write grant; linked non-admin = 0 rows on every
 direct table write, `save_my_profile` touches only whitelisted fields; admin = full write.
 
+### 2026-09-03 — Admin identity + linking made space-scoped
+`auth.users` is shared across the Darts Nexus platform (Key West etc.). The first cut had a
+global `app_admins` + email allowlist that wrongly included `fishontackle13@gmail.com` (a Key
+West admin). → `app_admins` gained `space_id` (PK `(user_id, space_id)`); `is_space_admin(uuid)`
+replaces `is_app_admin()` in every policy (`USING (is_space_admin(space_id))`); `link_my_player`
+takes `p_space_id`; `signUp()` + `resolveIdentity()` filter `players` by `SPACE_ID`. CJDA admins
+= Alexander, Wynie, dartsnexus@outlook.com. Migrations `space_scope_admins`,
+`link_my_player_space_scoped`. Verified: other-space admin → 0 rows on CJDA writes;
+`fishontackle13` → `is_app_admin()` false.
+
 ### 2026-09-03 — Profile Save writes an explicit field whitelist
 `saveProfileEdit` used to `savePlayer({...profileDraft})`, and `savePlayer`'s update path
 spreads every key of the object. A photo uploaded *after* clicking Edit updated
@@ -486,6 +509,8 @@ Commit `5b9a3c9`.
 20260903......  player_auth_linking        (players.auth_user_id, app_admins, is_app_admin())
 20260903......  rls_admin_write_lockdown   (all 16 CJDA tables: admin-only writes)
 20260903......  player_self_service_rpcs   (link_my_player, save_my_profile, set_my_photo)
+20260903......  space_scope_admins         (app_admins.space_id, is_space_admin(uuid), policies re-pointed)
+20260903......  link_my_player_space_scoped
 + execute_sql (not migrations):  Drawn Doubles night_types row · player-photos bucket + policies
                                  (bucket write policy re-scoped to admin-or-own after the lockdown)
 ```
@@ -499,7 +524,7 @@ Commit `5b9a3c9`.
 | `base_selection_points` is added to **seasonPoints** (not selectionPoints); `base_attendance_points` looks unused. | Low | **Open** — confirm intent with the club before "fixing". |
 | `night_types.contributes_selection` is defined but unused — `calcPlayerSeasonStats` keys selection nights off `counts_match_points`. | Low | **Open** — harmless today (both league types have it `true`); revisit if a selection-only night type is ever wanted. |
 | ~~RLS lets any authenticated user write any table~~ | — | **Resolved 2026-09-03** — all CJDA tables are admin-only writes (`is_app_admin()`); players get self-service RPCs only. Platform tables (`opens_*` etc.) still open — out of scope. |
-| `fishontackle13@gmail.com` is in the admin email allowlist but has no `auth.users` row / `app_admins` seed yet. | Low | **Open** — works via the `is_app_admin()` allowlist the moment they sign up; add to `app_admins` then. |
+| ~~`fishontackle13@gmail.com` in the CJDA admin list~~ | — | **Resolved 2026-09-03** — removed; they're a Key West admin. Admin identity is now space-scoped. |
 | ~19 early auth accounts exist with no linked player (public sign-up was open before the invite gate). | Low | **Open** — they're plain `viewer`s and can't write anything. They auto-link if the TD later puts their email on a `players` row. |
 | Missing Wednesday league nights: **2026-01-28, 2026-03-25, 2026-06-03, 2026-07-15**. | Low | **Open** — unconfirmed whether played. All other Wednesdays 12 Nov 2025 → 2 Sep 2026 are captured; Dec/early-Jan + 1 Apr (Easter) were scheduled breaks. |
 | Perfect 3-way cycle blocks: the app shows 1/2/3, the paper sheet marks all Pos 1. | Cosmetic | **Won't fix** — `getBlockPositions` cannot represent a tie; totals are identical so nothing downstream is wrong. |
