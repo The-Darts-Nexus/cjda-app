@@ -177,6 +177,9 @@ const state = {
   modal: null,
   activeStandingsTab: 'men', // men | ladies | juniors
   playersTab: 'men',         // men | ladies | juniors — Players tab category filter
+  profilePlayerId: null,     // when set, the Players tab shows this player's profile
+  profileEdit: false,        // profile in inline-edit mode
+  profileDraft: null,        // working copy while editing a profile
   selectedPlayerId: null,
   // Forms
   authEmail: '',
@@ -2391,7 +2394,7 @@ function renderHeader() {
         </div>
       </div>
       <div class="nav-tabs">
-        ${tabs.map(t => `<div class="nav-tab ${state.tab===t.id?'active':''}" onclick="state.tab='${t.id}';render()">${t.label}</div>`).join('')}
+        ${tabs.map(t => `<div class="nav-tab ${state.tab===t.id?'active':''}" onclick="state.tab='${t.id}';state.profilePlayerId=null;state.profileEdit=false;render()">${t.label}</div>`).join('')}
       </div>
     </div>`;
 }
@@ -2769,12 +2772,387 @@ function renderSeasonLog() {
 }
 
 
+// ═══════════════════════════════════════════════
+// PLAYER PROFILE
+// ═══════════════════════════════════════════════
 function openPlayerProfile(id) {
-  // Placeholder — full player profiles to be unpacked later.
-  showToast('Player profiles — coming soon');
+  state.profilePlayerId = id;
+  state.profileEdit = false;
+  state.profileDraft = null;
+  render();
+}
+function closePlayerProfile() {
+  state.profilePlayerId = null;
+  state.profileEdit = false;
+  state.profileDraft = null;
+  render();
+}
+function startProfileEdit() {
+  const p = state.players.find(x => x.id === state.profilePlayerId);
+  if (!p || !isAdmin()) return;
+  state.profileDraft = { ...p };
+  state.profileEdit = true;
+  render();
+}
+function cancelProfileEdit() {
+  state.profileEdit = false;
+  state.profileDraft = null;
+  render();
+}
+function updateProfileField(field, value) {
+  if (state.profileDraft) state.profileDraft[field] = value;
+}
+async function saveProfileEdit() {
+  if (!state.profileDraft || !isAdmin()) return;
+  const d = state.profileDraft;
+  if (!d.first_name || !d.last_name) { showToast('First and last name are required', 'error'); return; }
+  if (d.dart_weight_g === '' || d.dart_weight_g == null) d.dart_weight_g = null;
+  else d.dart_weight_g = parseInt(d.dart_weight_g) || null;
+  const draft = { ...d };
+  state.profileEdit = false;
+  state.profileDraft = null;
+  await savePlayer(draft);   // savePlayer → loadAllData → render
+}
+
+function downscaleImage(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.width, h = img.height;
+      if (w >= h && w > maxDim) { h = Math.round(h * maxDim / w); w = maxDim; }
+      else if (h > maxDim) { w = Math.round(w * maxDim / h); h = maxDim; }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      c.toBlob(b => b ? resolve(b) : reject(new Error('could not encode image')), 'image/jpeg', quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('not a readable image')); };
+    img.src = url;
+  });
+}
+
+async function uploadPlayerPhoto(playerId, input) {
+  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  state.loading = true; render();
+  try {
+    const blob = await downscaleImage(file, 512, 0.82);
+    const path = playerId + '.jpg';
+    const { error: upErr } = await sb.storage.from('player-photos').upload(path, blob, { upsert: true, contentType: 'image/jpeg' });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('player-photos').getPublicUrl(path);
+    const url = pub.publicUrl + '?v=' + Date.now();
+    const { error } = await sb.from('players').update({ photo_url: url }).eq('id', playerId);
+    if (error) throw error;
+    showToast('Photo updated');
+    await loadAllData();
+    return;
+  } catch (e) {
+    console.error('uploadPlayerPhoto:', e);
+    showToast('Photo upload failed: ' + (e.message || e), 'error');
+  }
+  state.loading = false; render();
+}
+
+async function removePlayerPhoto(playerId) {
+  if (!isAdmin()) return;
+  if (!confirm('Remove this player\'s photo?')) return;
+  state.loading = true; render();
+  try {
+    await sb.storage.from('player-photos').remove([playerId + '.jpg']);
+    await sb.from('players').update({ photo_url: null }).eq('id', playerId);
+    showToast('Photo removed');
+    await loadAllData();
+    return;
+  } catch (e) {
+    console.error('removePlayerPhoto:', e);
+    showToast('Could not remove photo: ' + (e.message || e), 'error');
+  }
+  state.loading = false; render();
+}
+
+// Player's rank in the Season Log standings for their category tab (juniors combined).
+function playerSeasonRank(playerId) {
+  const p = state.players.find(x => x.id === playerId);
+  if (!p) return null;
+  const juniors = p.category === 'junior_boy' || p.category === 'junior_girl';
+  const list = juniors
+    ? [...getStandings('junior_boy'), ...getStandings('junior_girl')].sort((a, b) => b.seasonPoints - a.seasonPoints || a.last_name.localeCompare(b.last_name))
+    : getStandings(p.category);
+  const i = list.findIndex(x => x.id === playerId);
+  if (i < 0) return null;
+  return { rank: i + 1, of: list.length, label: juniors ? 'Juniors' : (p.category === 'ladies' ? 'Ladies' : 'Men') };
+}
+
+// Competitions this player won outright (winning team / DIDO champion / singles playoff final).
+function playerCompWins(playerId) {
+  const wins = [];
+  (state.nights || [])
+    .filter(n => isCompNight(n.night_type_id) && (n.status === 'locked' || n.status === 'submitted'))
+    .forEach(n => {
+      const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+      const typeName = nt ? nt.name : 'Competition';
+      const title = typeName + (n.notes ? ' · ' + n.notes : '');
+      if (nightIsDido(n)) return;
+      if (isTeamComp(n)) {
+        const st = getDoublesStandings(n.id);
+        if (!st.length || !st[0].gp) return;
+        const team = compTeamsFor(n.id).find(t => t.seed === st[0].seed);
+        if (!team) return;
+        const ids = [team.player1_id, team.player2_id, team.player3_id].filter(Boolean);
+        if (!ids.includes(playerId)) return;
+        const partners = ids.filter(x => x !== playerId).map(x => {
+          const pp = state.players.find(y => y.id === x);
+          return pp ? pp.first_name + ' ' + pp.last_name : '?';
+        });
+        wins.push({ icon: '🥇', title, sub: partners.length ? 'with ' + partners.join(' & ') : '', date: n.date, end: n.end_date });
+      } else {
+        const fin = (state.nightPlayoffs || []).find(m => m.night_id === n.id && m.round === 3 && m.winner_id === playerId);
+        if (fin) wins.push({ icon: '🥇', title, sub: '', date: n.date, end: n.end_date });
+      }
+    });
+  getDidoChampions().filter(c => c.playerId === playerId).forEach(c => {
+    wins.push({ icon: '🎯', title: 'DIDO Knockout', sub: '8-player playoff', date: c.date, end: null });
+  });
+  return wins.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+function playerGdfEvents(playerId) {
+  const ids = new Set((state.gdfAttendance || []).filter(a => a.player_id === playerId).map(a => a.event_id));
+  return (state.gdfEvents || []).filter(e => ids.has(e.id)).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+// Career + season accolade tallies for the profile table.
+function playerAccoladeBreakdown(playerId) {
+  const s = calcPlayerSeasonStats(playerId);
+  const seasonId = getActiveSeasonId();
+  const nineAll = (state.accolades || []).filter(a => a.player_id === playerId && a.accolade_type === '9_darter');
+  const nineSeason = nineAll.filter(a => a.season_id === seasonId).length;
+  const seasonHc = (state.accolades || []).filter(a =>
+    a.player_id === playerId && a.season_id === seasonId &&
+    (a.accolade_type === 'high_close' || a.accolade_type === '170_close'));
+  const bestSeason = seasonHc.reduce((m, a) => Math.max(m, a.value || 0), 0);
+  const rows = [
+    { label: '180', color: '#FF6666', career: s.acc180career || 0, season: s.acc180ytd || 0 },
+    { label: '171', color: 'var(--green-accent)', career: s.acc171career || 0, season: s.acc171ytd || 0 },
+    { label: '170 Big Fish', color: '#FFA500', career: s.acc170career || 0, season: s.acc170ytd || 0 },
+    { label: '9 Darter', color: '#BB86FC', career: nineAll.length, season: nineSeason },
+    { label: 'High Close', color: 'var(--text-muted)', career: s.accHCcareer || 0, season: s.accHCytd || 0 },
+  ];
+  return {
+    rows,
+    bestCareer: s.highestClose || 0,
+    bestSeason,
+    careerTotal: rows.reduce((t, r) => t + r.career, 0),
+    seasonTotal: rows.reduce((t, r) => t + r.season, 0),
+  };
+}
+
+function playerInitials(p) {
+  return ((p.first_name || '')[0] || '') + ((p.last_name || '')[0] || '') || '?';
+}
+
+function renderPlayerProfile() {
+  const p = state.players.find(x => x.id === state.profilePlayerId);
+  if (!p) { closePlayerProfile(); return ''; }
+  const admin = isAdmin();
+  const editing = admin && state.profileEdit;
+  const d = editing ? (state.profileDraft || p) : p;
+
+  const stats = calcPlayerSeasonStats(p.id);
+  const rk = playerSeasonRank(p.id);
+  const wins = playerCompWins(p.id);
+  const events = playerGdfEvents(p.id);
+  const acc = playerAccoladeBreakdown(p.id);
+  const catLabel = { men: 'Men', ladies: 'Ladies', junior_boy: 'Junior (Boy)', junior_girl: 'Junior (Girl)' }[p.category] || p.category;
+
+  const card = (title, right, body) => `
+    <div class="card" style="overflow:hidden">
+      <div style="padding:9px 14px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:0.9rem;letter-spacing:0.12em">${title}</div>
+        ${right || ''}
+      </div>
+      <div style="padding:14px">${body}</div>
+    </div>`;
+  const countPill = (n) => `<span style="font-family:'Share Tech Mono',monospace;font-size:0.72rem;color:var(--text-muted);background:var(--bg);border:1px solid var(--border);border-radius:20px;padding:1px 9px">${n}</span>`;
+
+  const field = (label, key, opts = {}) => {
+    const val = d[key] == null ? '' : d[key];
+    if (!editing) {
+      return `<div><div style="font-size:0.62rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted)">${label}</div>
+        <div style="font-size:0.92rem;margin-top:2px;${opts.mono ? "font-family:'Share Tech Mono',monospace;font-size:0.86rem;" : ''}${val ? '' : 'color:var(--text-muted);font-style:italic'}">${val || '—'}</div></div>`;
+    }
+    if (opts.select) {
+      return `<div><label class="form-label">${label}</label>
+        <select class="form-input form-select" onchange="updateProfileField('${key}',this.value)">
+          ${opts.select.map(o => `<option value="${o.v}" ${String(val) === String(o.v) ? 'selected' : ''}>${o.t}</option>`).join('')}
+        </select></div>`;
+    }
+    return `<div><label class="form-label">${label}</label>
+      <input class="form-input" type="${opts.type || 'text'}" value="${String(val).replace(/"/g, '&quot;')}"
+        oninput="updateProfileField('${key}',this.value)" placeholder="${opts.ph || ''}"></div>`;
+  };
+
+  // ---- hero photo ----
+  const photo = p.photo_url
+    ? `<img src="${p.photo_url}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">`
+    : `<span style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--text-muted);letter-spacing:0.02em">${playerInitials(p)}</span>`;
+  const photoControls = admin ? `
+    <label style="position:absolute;left:0;right:0;bottom:0;height:24px;display:grid;place-items:center;background:rgba(0,0,0,0.6);color:#fff;font-size:0.62rem;letter-spacing:0.04em;cursor:pointer">
+      ${p.photo_url ? 'CHANGE' : '📷 UPLOAD'}
+      <input type="file" accept="image/*" style="display:none" onchange="uploadPlayerPhoto('${p.id}',this)">
+    </label>` : '';
+
+  const heroTags = `
+    <span class="pill pill-registered" style="text-transform:capitalize">${catLabel}</span>
+    <span class="pill pill-${p.status}">${p.status || '—'}</span>
+    ${rk ? `<span class="pill" style="background:radial-gradient(circle at 30% 30%,rgba(204,0,0,0.32),rgba(204,0,0,0.12));border:1px solid rgba(204,0,0,0.4);color:#FF6666">🎯 Rank #${rk.rank} · ${rk.label}</span>` : ''}`;
+
+  const tile = (k, v, s, accent) => `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 13px;position:relative;overflow:hidden">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${accent || 'var(--green)'}"></div>
+      <div style="font-size:0.6rem;font-weight:700;letter-spacing:0.09em;text-transform:uppercase;color:var(--text-muted)">${k}</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:2.1rem;line-height:1;margin-top:4px">${v}</div>
+      <div style="font-size:0.66rem;color:var(--text-muted);margin-top:2px">${s || ''}</div>
+    </div>`;
+
+  // ---- accolades table ----
+  const accBody = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.86rem">
+      <thead><tr>
+        <th style="text-align:left;font-size:0.6rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--text-muted);padding:5px 4px;border-bottom:1px solid var(--border)">Type</th>
+        <th style="text-align:right;font-size:0.6rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--text-muted);padding:5px 4px;border-bottom:1px solid var(--border)">Career</th>
+        <th style="text-align:right;font-size:0.6rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--text-muted);padding:5px 4px;border-bottom:1px solid var(--border)">Season</th>
+      </tr></thead>
+      <tbody>
+        ${acc.rows.map(r => `<tr>
+          <td style="padding:6px 4px;border-bottom:1px solid rgba(45,106,45,0.18)"><span style="display:inline-flex;align-items:center;gap:7px;font-weight:600"><span style="width:9px;height:9px;border-radius:50%;background:${r.color}"></span>${r.label}</span></td>
+          <td style="text-align:right;padding:6px 4px;border-bottom:1px solid rgba(45,106,45,0.18);font-family:'Share Tech Mono',monospace;${r.career ? '' : 'color:var(--text-muted)'}">${r.career}</td>
+          <td style="text-align:right;padding:6px 4px;border-bottom:1px solid rgba(45,106,45,0.18);font-family:'Share Tech Mono',monospace;${r.season ? '' : 'color:var(--text-muted)'}">${r.season}</td>
+        </tr>`).join('')}
+      </tbody>
+      <tfoot><tr>
+        <td style="padding:8px 4px 0;font-weight:700">Best checkout</td>
+        <td style="text-align:right;padding:8px 4px 0;font-family:'Share Tech Mono',monospace;color:var(--green-accent);font-weight:700">${acc.bestCareer || '—'}</td>
+        <td style="text-align:right;padding:8px 4px 0;font-family:'Share Tech Mono',monospace;color:var(--green-accent);font-weight:700">${acc.bestSeason || '—'}</td>
+      </tr></tfoot>
+    </table>`;
+
+  const dateStr = (x) => x.end ? fmtGdfDate(x.date, x.end) + ' ' + new Date(x.date + 'T00:00:00').getFullYear() : formatDate(x.date);
+  const winsBody = wins.length
+    ? `<div style="display:flex;flex-direction:column;gap:2px">${wins.map(w => `
+        <div style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:baseline;padding:7px 2px;border-bottom:1px solid rgba(45,106,45,0.18)">
+          <span>${w.icon}</span>
+          <span><span style="font-weight:600;font-size:0.88rem">${w.title}</span>${w.sub ? `<br><span style="font-size:0.72rem;color:var(--text-muted)">${w.sub}</span>` : ''}</span>
+          <span style="font-family:'Share Tech Mono',monospace;font-size:0.72rem;color:var(--text-muted);white-space:nowrap">${dateStr(w)}</span>
+        </div>`).join('')}</div>`
+    : `<div style="font-size:0.8rem;color:var(--text-muted);font-style:italic">No competition wins yet.</div>`;
+
+  const evPill = (t) => {
+    const m = { johannesburg: ['JHB', 'rgba(45,106,45,0.3)', 'var(--green-accent)'], gauteng: ['Gauteng', 'rgba(255,165,0,0.16)', '#FFA500'] }[t] || [(t || 'GDF'), 'rgba(45,106,45,0.2)', 'var(--text-muted)'];
+    return `<span class="pill" style="background:${m[1]};color:${m[2]};border:1px solid var(--border)">${m[0]}</span>`;
+  };
+  const eventsBody = events.length
+    ? `<div style="display:flex;flex-direction:column;gap:2px">${events.map(e => `
+        <div style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:baseline;padding:7px 2px;border-bottom:1px solid rgba(45,106,45,0.18)">
+          <span>📅</span>
+          <span style="font-weight:600;font-size:0.88rem">${e.name}</span>
+          <span style="font-family:'Share Tech Mono',monospace;font-size:0.72rem;color:var(--text-muted);white-space:nowrap">${fmtGdfDate(e.date, e.end_date)} ${evPill(e.event_type)}</span>
+        </div>`).join('')}</div>`
+    : `<div style="font-size:0.8rem;color:var(--text-muted);font-style:italic">No GDF events recorded.</div>`;
+
+  // ---- equipment ----
+  const equipBody = editing
+    ? `<div style="display:flex;flex-direction:column;gap:10px">
+        ${field('Brand', 'dart_brand', { ph: 'e.g. Target, Winmau, Red Dragon' })}
+        ${field('Model', 'dart_model', { ph: 'e.g. Power 9Five Gen 5' })}
+        ${field('Weight (g)', 'dart_weight_g', { type: 'number' })}
+        ${field('Setup notes', 'dart_notes', { ph: 'grip, point, flights, stems…' })}
+      </div>`
+    : (p.dart_brand || p.dart_model || p.dart_weight_g || p.dart_notes)
+      ? `<div style="display:flex;flex-direction:column;gap:9px">
+          <div style="height:18px;border-radius:4px;background:linear-gradient(90deg,transparent 0 8%,rgba(0,0,0,0.35) 8% 9%,transparent 9% 17%,rgba(0,0,0,0.35) 17% 18%,transparent 18% 26%,rgba(0,0,0,0.35) 26% 27%,transparent 27%),linear-gradient(180deg,#7c8a7c,#4c574c)"></div>
+          ${[['Brand', p.dart_brand], ['Model', p.dart_model], ['Weight', p.dart_weight_g ? p.dart_weight_g + ' g' : '']].filter(r => r[1]).map(r => `<div style="display:flex;gap:10px"><span style="font-size:0.62rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);width:66px;flex-shrink:0">${r[0]}</span><span style="font-size:0.9rem">${r[1]}</span></div>`).join('')}
+          ${p.dart_notes ? `<div style="margin-top:2px;padding:9px 11px;border:1px dashed var(--border);border-radius:7px;background:var(--bg);font-size:0.82rem;color:var(--text-muted)">${p.dart_notes}</div>` : ''}
+        </div>`
+      : `<div style="font-size:0.8rem;color:var(--text-muted);font-style:italic">No darts setup recorded.${admin ? ' Use Edit to add it.' : ''}</div>`;
+
+  const detailsBody = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 18px">
+      ${field('Nick Name', 'nickname')}
+      ${field('DSA Number', 'dsa_number', { mono: true })}
+      ${field('First Name', 'first_name')}
+      ${field('Surname', 'last_name')}
+      ${field('Cellphone Number', 'phone', { mono: true })}
+      ${field('Email', 'email')}
+      ${editing ? field('Category', 'category', { select: [['men', 'Men'], ['ladies', 'Ladies'], ['junior_boy', 'Junior (Boy)'], ['junior_girl', 'Junior (Girl)']].map(([v, t]) => ({ v, t })) }) : ''}
+      ${editing ? field('Status', 'status', { select: [{ v: 'registered', t: 'Registered' }, { v: 'temp', t: 'Temporary' }] }) : ''}
+    </div>`;
+
+  return `
+    <div style="padding:10px;display:flex;flex-direction:column;gap:12px;max-width:940px;margin:0 auto">
+
+      <div class="card" style="display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:center;padding:16px 18px">
+        <div style="position:relative;width:88px;height:88px;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:radial-gradient(circle at 35% 30%,#1e4a1e,#0d260d);border:2px solid var(--green)">
+          ${photo}${photoControls}
+        </div>
+        <div style="min-width:0">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;line-height:1;color:var(--text)">${p.first_name} ${p.last_name}</div>
+          ${p.nickname ? `<div style="color:var(--green-accent);font-weight:600;font-size:0.92rem;margin-top:2px">“${p.nickname}”</div>` : ''}
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">${heroTags}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-end">
+          <button class="btn btn-ghost" style="font-size:0.74rem;padding:5px 11px" onclick="closePlayerProfile()">← Players</button>
+          ${admin && !editing ? `<button class="btn btn-primary" style="font-size:0.74rem;padding:5px 11px" onclick="startProfileEdit()">Edit</button>` : ''}
+          ${editing ? `<div style="display:flex;gap:6px">
+              <button class="btn btn-ghost" style="font-size:0.74rem;padding:5px 11px" onclick="cancelProfileEdit()">Cancel</button>
+              <button class="btn btn-primary" style="font-size:0.74rem;padding:5px 11px" onclick="saveProfileEdit()">Save</button>
+            </div>` : ''}
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        ${tile('Competitions Won', wins.length, wins.length ? 'last: ' + formatDate(wins[0].date) : '—', 'var(--red)')}
+        ${tile('Career Accolades', acc.careerTotal, '180 ×' + (acc.rows[0].career) + ' · H/C ×' + acc.rows[4].career, '#FFA500')}
+        ${tile('Season Accolades', acc.seasonTotal, 'this season', 'var(--green-accent)')}
+        ${tile('GDF Events', events.length, '', 'var(--green)')}
+      </div>
+
+      ${card('Player Details', editing ? `<span style="font-size:0.64rem;color:var(--green-accent)">editing</span>` : '', detailsBody)}
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px;align-items:start">
+        ${card('Accolades', `<span style="font-size:0.64rem;color:var(--text-muted)">career / season</span>`, accBody)}
+        ${card('The Arrows', editing ? `<span style="font-size:0.64rem;color:var(--green-accent)">editing</span>` : '', equipBody)}
+        ${card('Competitions Won', countPill(wins.length), winsBody)}
+        ${card('GDF Events Played', countPill(events.length), eventsBody)}
+      </div>
+
+      ${admin && !editing ? `<div style="display:flex;justify-content:flex-end">
+        <button class="btn btn-ghost" style="color:var(--red);font-size:0.72rem;padding:4px 10px" onclick="deletePlayerFromProfile('${p.id}')">Delete player</button>
+      </div>` : ''}
+
+    </div>`;
+}
+
+async function deletePlayerFromProfile(id) {
+  const p = state.players.find(x => x.id === id);
+  if (!p || !isAdmin()) return;
+  if (!confirm(`Delete ${p.first_name} ${p.last_name}? This cannot be undone.`)) return;
+  const { error } = await sb.from('players').delete().eq('id', id);
+  if (error) { showToast(error.message, 'error'); return; }
+  showToast('Player removed');
+  state.profilePlayerId = null;
+  state.profileEdit = false;
+  state.profileDraft = null;
+  await loadAllData();
 }
 
 function renderPlayers() {
+  if (state.profilePlayerId) return renderPlayerProfile();
+
   const tabs = [
     { id: 'men', label: 'Men', cats: ['men'] },
     { id: 'ladies', label: 'Ladies', cats: ['ladies'] },
@@ -2815,10 +3193,7 @@ function renderPlayers() {
         <td style="${td}"><span class="pill pill-${p.status}">${p.status || '—'}</span></td>
         <td style="${td};font-family:'Share Tech Mono',monospace;font-size:0.72rem;color:var(--text-muted)">${p.phone || '—'}</td>
         <td style="${td};text-align:right">
-          <div style="display:inline-flex;gap:4px">
-            ${isAdmin() ? `<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openEditPlayer('${p.id}')">Edit</button>` : ''}
-            <button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openPlayerProfile('${p.id}')">Profile</button>
-          </div>
+          <button class="btn btn-ghost" style="padding:2px 10px;font-size:0.7rem" onclick="openPlayerProfile('${p.id}')">Profile →</button>
         </td>
       </tr>`;
   }).join('');
@@ -3644,10 +4019,9 @@ function openAddPlayer() {
   render();
 }
 function openEditPlayer(id) {
-  const p = state.players.find(x => x.id === id);
-  if (!p) return;
-  state.modal = { mode: 'edit', data: { ...p } };
-  render();
+  // Editing moved onto the player profile page.
+  openPlayerProfile(id);
+  if (isAdmin()) startProfileEdit();
 }
 function updateModalField(field, value) {
   if (state.modal) { state.modal.data[field] = value; }
