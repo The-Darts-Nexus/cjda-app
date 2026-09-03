@@ -420,6 +420,17 @@ policy + authenticated write policy, 3 MB, jpeg/png/webp). Photos downscaled to 
 client-side. Commit `35abdca`. Design mockup:
 `https://claude.ai/code/artifact/ab0d2775-a76c-4200-bdcb-41b50387d69f`.
 
+### 2026-09-03 — Profile Save writes an explicit field whitelist
+`saveProfileEdit` used to `savePlayer({...profileDraft})`, and `savePlayer`'s update path
+spreads every key of the object. A photo uploaded *after* clicking Edit updated
+`players.photo_url` + reloaded `state.players`, but not the in-memory `profileDraft`, so the
+next Save wrote the stale `photo_url: null` back. → `saveProfileEdit` now `update()`s a
+hand-built patch of only the form's fields (never `photo_url`, `base_*`, `id_number`,
+timestamps). New `miniAvatar(p, size)` helper (photo `<img>` over an initials disc, removes
+itself on error) — used on the profile hero and Home Season Standings. Home Season Standings
+name shows `nickname || first_name` (no surname); the Season Log tab keeps full names.
+Commit `5b9a3c9`.
+
 ### Migration ledger (Supabase, CJDA-relevant)
 
 ```
@@ -445,6 +456,7 @@ client-side. Commit `35abdca`. Design mockup:
 | Perfect 3-way cycle blocks: the app shows 1/2/3, the paper sheet marks all Pos 1. | Cosmetic | **Won't fix** — `getBlockPositions` cannot represent a tie; totals are identical so nothing downstream is wrong. |
 | Singles competitions (CoC / Home Alone / Open) have no data and only playoff-final winner detection in `playerCompWins`. | Low | **Open** — revisit if those competitions are ever run. |
 | 2026-09-02 night lost blocks 4 & 5 during a pre-`slotPlayerId` submit crash. | — | **Resolved** — reopened + re-entered; `slotPlayerId` fix shipped. |
+| Profile Save wiped `players.photo_url` (stale-draft spread by `savePlayer`). | — | **Resolved** `5b9a3c9` — `saveProfileEdit` now patches a field whitelist. |
 | Home "Competition Results" used to hide older competitions (grouped by type, latest only). | — | **Resolved** `a25ca67` — now one column per completed competition. |
 
 ---
