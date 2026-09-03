@@ -1,371 +1,544 @@
-# 14. Handover Improvement Backlog
+# CJDA — Technical Handover (Section 14)
 
-## Purpose
-
-The current handover is sufficient for understanding the CJDA business rules, feature set, and development roadmap. However, it is not yet a complete developer handover.
-
-The items below should be progressively documented to make this file the single source of truth for future development sessions and AI-assisted development.
+> Companion to the business handover (Sections 1–13, held separately).
+> This file is the technical source of truth for the CJDA app. Keep it current — every
+> schema change, new engine, or business rule shift gets an entry in §14.7.
+>
+> **Last updated:** 2026-09-03 · **Assessment:** Business 9/10 · Technical **9/10**
 
 ---
 
-## 14.1 Repository Structure Documentation
+## 14.0 Snapshot
 
-Future update required:
+| | |
+|---|---|
+| **App** | Single file — [`index.html`](index.html) (~4,240 lines). No build step, no framework. |
+| **Front end** | Tailwind Play CDN + `@supabase/supabase-js@2` (UMD). One inline `<script>` from line ~122. |
+| **State** | One global `const state = {…}`. `render()` rebuilds `#root.innerHTML` on every change (full re-render). |
+| **Backend** | Supabase project `zsynlrutfkdjmmyznhst`. All data scoped to one space (`SPACE_ID = 00ca89b5-86f4-4c46-b853-0503796769de`, "Central Johannesburg Darts Association"). |
+| **Auth** | `sb.auth` email + password. `ADMIN_EMAILS` (hard-coded array, line ~131) → role `admin`; any other signed-in user → `viewer`; not signed in → `guest`. |
+| **Repo** | `main` only, direct commits. `index.html`, `README.md`, this file. Commits co-authored by Claude. |
+| **Reference IDs** | Season "2026 Season" `2ca00843-…`; game type 501 `95b17ec3-…`; space `00ca89b5-…`. Night-type IDs in §14.3. |
 
-Document the application structure, including:
+The multi-tenant platform ("The Darts Nexus") owns many other tables in this same
+database (`spaces`, `hub_settings`, `subscriptions`, `revenue`, `opens_*`, `teams`,
+`competitions`, `activity_logs`, `app_state`, …). **The CJDA app does not read or write
+those** — ignore them unless working on the platform itself.
 
-```text
-src/
-components/
-pages/
-services/
-hooks/
-utils/
-```
+---
 
-For each major file document:
+## 14.1 Repository / File Structure
 
-- Purpose
-- Key responsibilities
-- Dependencies
+There is no `src/`. The app is one HTML file. Logical "modules" are comment-banded
+sections of the inline script. Approximate map (line numbers drift — search by name):
 
-Example:
+| Section | ~Lines | Responsibility |
+|---|---|---|
+| Config + Supabase init | 122–140 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPACE_ID`, `ADMIN_EMAILS`, `isAdminEmail()`, `sb` client |
+| App state | 141–190 | the `state` object (see §14.2) |
+| Utilities | 190–215 | `isAdmin`, `showToast`, `formatDate`, `ordinal` |
+| Auth | 216–247 | `signIn`, `signUp`, `signOut` |
+| Data loading | 248–276 | `loadAllData()` — one bulk fetch of every table the app uses |
+| Competition helpers | 309–396 | `isCompNight`, `getCompNights`, `isTeamComp`, `compTeamsFor`, `compMatchesFor`, `getDoublesStandings`, `getDoublesWinner`, `getCompStandings` |
+| GDF attendance | 402–592 | `fmtGdfDate`, `renderGdfCalendar`, `toggleGdfAttendance`, `saveGdfEvent`, `deleteGdfEvent` |
+| Night entry / setup | 593–1090 | `viewNight`, `reopenNight`, `openNightEntry`, `saveNight`, block builders, `generateBlocksFromRegister`, player picker widget, `slotPlayerId` |
+| Block scoring | 1092–1195 | `nightMatchLegs`, `legColor`, `updateLeg`, accolade record helpers, `calcBlockStats`, `getBlockPositions` |
+| DIDO | 1196–1552 | `nightIsDido`, `didoBlockStandings`, `didoQualifiers`, `didoSeeds`, `recomputeBracket`, `didoStateStandings`, `didoNightWinnerId`, `generateDidoPlayoffs`, `renderDidoPlayoffs` |
+| Team competitions | 1553–1915 | `compHasResults`, `addCompTeam`/`removeCompTeam`/`setCompTeamPlayer`/`setCompTeamBonus`, `addCompSession`, `updateCompDates`, `updateCompMatch`, `addCompAccolade`, `setCompStatus`, `renderDoublesComp` |
+| Night persistence | 1910–2035 | `submitNight`, `purgeNightBlockData`, `writeNightBlocks` (shared by submit + draft save) |
+| Season calc | 2115–2300 | `getActiveSeasonId`, **`calcPlayerSeasonStats`**, `getStandings`, `getSeasonAccoladeLeaders`, `accoladeName`/`accoladeClass` |
+| Player CRUD | 2307–2333 | `savePlayer`, `deletePlayer` |
+| Render — screens | 2334–4030 | `renderAuth`, `renderHeader`, `renderHome`, `renderSeasonLog`, `renderPlayers`, **`renderPlayerProfile`**, `renderAccoladeGuide`, `renderNightSetup`, `renderScheduleAssistant`, `renderBlockEntry`, `renderCompetitions`, `renderConfig`, `renderModal` |
+| Player profile | 2778–3152 | `openPlayerProfile`/`closePlayerProfile`, `startProfileEdit`/`saveProfileEdit`/`cancelProfileEdit`, `downscaleImage`, `uploadPlayerPhoto`/`removePlayerPhoto`, `playerSeasonRank`, `playerCompWins`, `playerGdfEvents`, `playerAccoladeBreakdown` |
+| Main render + init | 4201–end | `render()` tab switch, `restoreAssistantUI`, bootstrap IIFE (session restore → `loadAllData`) |
 
-```text
-season-log.ts
-Responsible for standings generation and season calculations.
-
-night-setup.ts
-Responsible for block entry, calculations and submission.
-
-supabase.ts
-Centralized Supabase client and database access layer.
-```
-
-Reason:
-
-A future developer or AI session should be able to locate functionality immediately without reverse-engineering the repository.
+**Verification tooling** (not in the repo — kept in the session scratchpad): a headless
+Edge harness (`msedge --headless=new --dump-dom`) that stubs `window.supabase`, splices in
+the inline script, and asserts against `render()` output. Used to test every UI change in
+this file without a live browser.
 
 ---
 
 ## 14.2 Core Application Flow
 
-Future update required:
-
-Document:
-
-```text
-User Login
-→ Home Page
-→ Night Setup
-→ Submit Night
-→ Save Results
-→ Update Standings
-→ Update Season Log
+```
+Sign in ──▶ bootstrap IIFE ──▶ loadAllData()  (one bulk fetch, fills state.*)
+                                    │
+                                    ▼
+                              render()  ── switch(state.tab) ──▶ one render<Screen>()
+                                    │                              writes #root.innerHTML
+   every onclick handler ──────────┘  mutates state → calls render() again
 ```
 
-Include:
+`state` (the important keys):
 
-- Page relationships
-- Data flow
-- Submission workflow
+| Key | Meaning |
+|---|---|
+| `user`, `role` | auth identity; `role` ∈ `guest` \| `viewer` \| `admin` |
+| `tab` | active screen: `home` \| `nightsetup` \| `seasonlog` \| `players` \| `accolades` \| `competitions` \| `config` |
+| `players seasons nights nightTypes gameTypes results blocks blockPlayers accolades spaceConfig` | mirror of the DB, refreshed by `loadAllData()` |
+| `nightAttendance nightPlayoffs compTeams compMatches gdfEvents gdfAttendance` | secondary tables |
+| `activeNight` | night currently being entered/viewed; `.viewOnly` when read-only. When set, Night Setup / Competitions render the entry sheet instead of the list |
+| `nightBlocks` | in-memory working copy of the block sheet `[{label,size,slots,legs,accolades,bonus,id}]`. **`slots[i]` is a scalar player-id for singles, an array for team formats** — unwrap with `slotPlayerId()` |
+| `activeBlockIdx compSession` | which block / competition-session tab is showing |
+| `profilePlayerId profileEdit profileDraft` | player-profile screen state |
+| `playersTab` | Players tab category filter (`men` \| `ladies` \| `juniors`) |
+| `gdfMonth` | selected month (`YYYY-MM`) in the GDF attendance list |
+| `modal` | `{mode, data}` for the Add-Player / Create-Night / Add-GDF-Event / Create-Competition dialogs |
+| `assistant` | Schedule Assistant panel (night register + random block draw) |
 
-Reason:
+### The night submission workflow (the critical path)
 
-Understanding the application flow is critical when debugging calculations and data synchronisation issues.
+```
+Create Night (draft) ──▶ openNightEntry ──▶ assign players / enter legs / accolades
+   │                                          │
+   │              Save Draft ◀────────────────┤  writeNightBlocks('draft')  (recovery only)
+   │                                          │
+   └──▶ Submit Night ────────────────────────▶ purgeNightBlockData()  (delete any draft rows)
+                                               writeNightBlocks('locked')
+                                               nights.status = 'locked'
+                                               loadAllData() → standings + Season Log recompute on next render
+```
+
+- **`writeNightBlocks(status)`** — for each in-memory block: insert `blocks` row → insert
+  `block_players` (one per filled slot, `slot_index` + `sub_slot`) → insert `results` (one
+  row per unordered pair, `home` = lower slot, legs from the matrix) → insert `accolades`
+  (expanded: one row per 180/171/HC/L15/9-dart occurrence). A match with `0–0` legs is a
+  **walkout** and is skipped by the points engine.
+- **`purgeNightBlockData(nightId)`** deletes accolades → results → block_players → blocks
+  for that night. Submit always purges first, so re-submitting never duplicates.
+- **`reopenNight(nightId)`** (admin) flips a locked league night back to `draft` and its
+  blocks to `open`, then re-opens the entry sheet. Season Log recalculates on the next submit.
+- Standings and the Season Log are **never stored** — they are recomputed from `results` +
+  `accolades` + `blocks` every render by `calcPlayerSeasonStats` / `getStandings`.
 
 ---
 
 ## 14.3 Core Database Tables
 
-Future update required:
+All CJDA tables carry `space_id` (always `SPACE_ID`) + `created_at`. RLS: see §14.6.
 
-Document all primary tables and their purpose.
+### Player & season reference
 
-Minimum tables expected:
+**`players`** — one row per person.
+`dsa_number`, `id_number`, `first_name`*, `last_name`*, `category`* (`men` \| `ladies` \|
+`junior_boy` \| `junior_girl`), `status` (`registered` \| `temp`, default `temp`), `email`,
+`phone`, `nickname`, `photo_url`, `dart_brand`, `dart_model`, `dart_weight_g`, `dart_notes`,
+`base_selection_points`, `base_attendance_points`, `highest_close`, `base_career_180s`,
+`base_career_171s`, `base_career_170s`, `base_career_hc_count`.
+The `base_*` columns are pre-app career totals folded into the calculated figures.
 
-```text
-players
-seasons
-night_types
-nights
-blocks
-block_players
-results
-accolades
-competitions
-competition_entries
-competition_results
-attendance_events
-attendance_records
-```
+**`seasons`** — `name`*, `start_date`*, `end_date`, `is_active`, plus **two independent date
+ranges**: `season_points_start/end` (prize-giving) and `selection_points_start/end`
+(national selection). Only one row is `is_active`. Current: SP `2025-11-12 → 2026-11-12`,
+Sel `2026-06-01 → 2027-05-01`.
 
-For each table capture:
+**`game_types`** — `501` only (`95b17ec3-…`), `starting_score` 501, `default_legs` 3.
 
-- Table purpose
-- Key fields
-- Relationships
-- Any important constraints
+**`night_types`** — flags that drive every engine:
 
-Reason:
+| Name | id | `counts_match_points` | `contributes_attendance` | `has_block_play` |
+|---|---|:-:|:-:|:-:|
+| **Wednesday** | `f16ab311-0c17-4437-bd33-846e92076a20` | ✅ | ✅ | ✅ |
+| **DIDO** | `1834b6d3-cd7a-4e96-a54a-d700dcccc8fe` | ✅ | ✅ | ✅ |
+| Selected Doubles | `fed910d9-e1d3-4877-a3d9-3169613b38a5` | ❌ | ✅ | ✅ |
+| Drawn Doubles | `e81f3c5d-e3bf-444d-a99d-45fe9a6d9561` | ❌ | ✅ | ✅ |
+| Mixed Triples | `87b70999-8cab-4240-9289-c19a83132348` | ❌ | ✅ | ❌ |
+| Mix Doubles | `737cf149-4b4c-4ea3-8b4b-43dfd845f0ca` | ❌ | ✅ | ✅ |
+| Champion of Champions | `691aa40d-b635-4b70-97e8-3c6fe83c6827` | ❌ | ✅ | ❌ |
+| Home Alone Cup | `d9a3c1fa-e1f9-4e21-966b-06619e59dd56` | ❌ | ✅ | ✅ |
+| Open Competition | `ff61dd63-9388-47d6-b5c9-2475b54935a8` | ❌ | ✅ | ❌ |
 
-Database structure is currently tribal knowledge and not captured in the handover.
+`counts_match_points = true` ⇒ **league night** (Wednesday + DIDO). Everything else is a
+**competition** (`isCompNight()` = `!counts_match_points`).
+
+### Night play
+
+**`nights`** — `season_id`, `night_type_id`, `date`* , `status` (`draft` \| `submitted` \|
+`locked`), `notes` (team-comp section label — keep short, e.g. "Men"/"Ladies"), `end_date`
+(multi-day comps), `comp_sessions` (smallint, default 1).
+
+**`blocks`** — `night_id`, `game_type_id`, `block_label` ("Block 1"…), `size` (**CHECK 3–8**),
+`bonus` (per-player points added to everyone in the block), `status` (`open` \| `submitted` \|
+`locked`).
+
+**`block_players`** — `block_id`, `player_id`, `slot_index` (sheet row − 1), `sub_slot`
+(0 for singles; 0/1/2 for team formats).
+
+**`results`** — `block_id`, `night_id`, `season_id`, `home_player_id`, `away_player_id`,
+`home_legs`, `away_legs`. One row per unordered pair per block. `home` = the lower slot.
+`0–0` = walkout (ignored by scoring).
+
+**`accolades`** — `player_id`, `night_id`, `season_id`, `accolade_type`
+(`180` \| `171` \| `170_close` \| `high_close` \| `15_dart` \| `9_darter` \| `5_bulls` \|
+`6_bulls`), `value` (checkout value for HC/170; dart count for 15-dart; else 1). One row per
+occurrence. **Counted regardless of night type** — competition accolades feed player stats.
+
+### DIDO playoffs
+
+**`night_playoff_matches`** — `night_id`, `round` (1 = QF, 2 = SF, 3 = Final),
+`match_number`, `slot_a_seed`/`slot_b_seed` (1–8, null for SF/Final), `player_a_id`/
+`player_b_id`, `a_legs`/`b_legs`, `winner_id`, `best_of` (default 1). **Never contributes
+points** — separate from `results`.
+
+### Team competitions (Selected/Drawn Doubles, Mixed Triples, Mix Doubles)
+
+**`comp_teams`** — `night_id`, `seed` (1..N, grid order), `player1_id`, `player2_id`,
+`player3_id` (null = doubles), `bonus`.
+
+**`comp_matches`** — `night_id`, `session` (1,2,3… — multi-night), `team_a_seed` <
+`team_b_seed`, `a_legs`, `b_legs`. One row per pairing per session.
+
+### Attendance
+
+**`night_attendance`** — `night_id`, `player_id`. The register on the night-entry screen;
+feeds the Season Log "Att Pts" column (via `contributes_attendance` night types).
+
+**`gdf_events`** — `name`*, `date`*, `end_date`, `event_type` (**CHECK** `wednesday` \|
+`johannesburg` \| `gauteng`), `notes`.
+**`gdf_attendance`** — `event_id`, `player_id`. **Standalone tracker — does NOT feed the
+Season Log.** UI: `renderGdfCalendar` (month-tab list, admin adds attendees per event).
+
+### Legacy / unused by CJDA
+
+`competitions`, `teams`, `opens_*`, `accolades_config`, `space_accolades` — platform
+scaffolding, not wired into the CJDA screens.
 
 ---
 
 ## 14.4 Database Relationship Map
 
-Future update required:
+```
+seasons ─┬─ nights ─┬─ blocks ─┬─ block_players ── players
+         │          │          └─ results ─────────┐
+         │          ├─ accolades ──────────────────┤
+         │          ├─ night_attendance ───────────┤
+         │          ├─ night_playoff_matches ──────┤   (DIDO only, no points)
+         │          ├─ comp_teams ─────────────────┤   (team comps only)
+         │          └─ comp_matches                │
+         └─ results.season_id, accolades.season_id │
+                                                   │
+players ───────────────────────────────────────────┘
+        └─ gdf_attendance ── gdf_events            (standalone, no points)
 
-Create a simple relationship diagram.
-
-Example:
-
-```text
-Season
- └─ Nights
-      └─ Blocks
-           └─ Results
-                └─ Accolades
-
-Players
- └─ Results
- └─ Accolades
- └─ Attendance
+game_types ── blocks.game_type_id
+night_types ── nights.night_type_id               (flags drive all scoring)
+space_config, hub_settings                         (theme / club config)
 ```
 
-Reason:
-
-Will simplify troubleshooting and future feature development.
+Cascade deletes are **not** relied on — `deleteNight`, `deleteCompetition`,
+`purgeNightBlockData` delete children explicitly in order.
 
 ---
 
 ## 14.5 Critical Functions
 
-Future update required:
+### `calcPlayerSeasonStats(playerId)` → season/career figures for one player
 
-Document all major functions.
+Pure (reads `state`, writes nothing). Wrapped in try/catch → zeroed object on error.
 
-Examples:
+1. Find every night the player appears in (via `block_players` → `blocks` → `night_id`).
+2. **Season-points nights** = those with `counts_match_points` **and** `date ∈
+   [season_points_start, season_points_end]`. **Selection-points nights** = same but the
+   selection date range. **Attendance nights** = `contributes_attendance` in the SP range.
+3. `calcPoints(nightSet)` = Σ over the player's `results` in those nights of
+   `myLegs` (legs won) `+ 2 ×` (games won), plus each distinct block's `bonus`. Walkouts
+   (`0–0`) skipped.
+4. Accolades YTD = the player's `accolades` whose night falls in the SP range, tallied by
+   type. `highestClose` = max HC/170 `value` (YTD) then `max(…, players.highest_close)` →
+   returned as the **career** best.
+5. Career accolade counts = `base_career_* + YTD`.
 
-```text
-calcPlayerSeasonStats()
+**Returns:** `seasonPoints` ( = SP total **+ `players.base_selection_points`** ),
+`selectionPoints` ( = selection total, no base ), `attendancePoints`, `thisWeek`,
+`legsWon`, `gamesWon`, `gamesPlayed`, `acc180ytd/career`, `acc171ytd/career`,
+`acc170ytd/career`, `accHCytd/career`, `highestClose`, `acc15ytd`, `accolades[]`.
 
-Purpose:
-Calculates Season Log standings.
+> ⚠ `base_selection_points` is added to **seasonPoints**, and `base_attendance_points`
+> appears unused. See §14.8.
 
-Uses:
-- results
-- blocks
-- accolades
+### `getStandings(category)` → ranked list for a Season Log tab
 
-Returns:
-- season points
-- selection points
-- attendance totals
-```
+`players` in `category` → `+ calcPlayerSeasonStats` → **drop anyone with zero activity**
+(no season/selection/attendance points, no accolades, no `base_selection_points`) → sort
+`seasonPoints` desc, then `last_name`. Index + 1 = the player's rank. Juniors tab =
+`junior_boy` + `junior_girl` merged and re-sorted.
 
-```text
-submitNight()
+### `getDoublesStandings(nightId)` → team-competition table
 
-Purpose:
-Commits a completed night to Supabase.
+Per `comp_teams` row, aggregate `comp_matches` across all sessions:
+`total = legsWon + gamesWon×2 + team.bonus`. Sort `total` desc → `legsWon` desc → `seed`.
+`getDoublesWinner` = `standings[0].name` when it has games played.
 
-Creates:
-- blocks
-- block_players
-- results
-- accolades
-```
+### `getBlockPositions(blockIdx)` (displayed block POS) vs `didoStateStandings` / `didoBlockStandings`
 
-Document:
+- **`getBlockPositions`** — sort by total points **only**; ties broken by slot/row order
+  (stable sort). **No head-to-head.** This is what the block sheet shows.
+- **`didoBlockStandings` / `didoStateStandings`** — add an H2H tie-break inside equal-total
+  groups. Used **only** for DIDO playoff seeding and the DIDO night winner, never for the
+  displayed Wednesday POS.
+- Consequence for historical capture: to reproduce a paper sheet whose POS used H2H, insert
+  `block_players` in the sheet's final-standings order.
 
-- Inputs
-- Outputs
-- Side effects
+### `submitNight()` / `writeNightBlocks()` / `purgeNightBlockData()`
 
-Reason:
+See §14.2. `submitNight` is admin-only, confirms, purges, writes `locked`, sets
+`nights.status`, reloads.
 
-Prevents accidental changes to critical calculation logic.
+### `didoNightWinnerId(nightId)`
+
+Playoff final `winner_id` if a bracket exists; else `null` if a bracket exists but the
+final isn't done; else the top of `didoStateStandings` (the "no-playoff, take it by
+standings" fallback).
+
+### `playerCompWins(playerId)` (profile)
+
+Outright winners only: winning `comp_teams` row of a locked team comp (from
+`getDoublesStandings[0]`), DIDO champions (`getDidoChampions`), or a singles-comp
+`night_playoff_matches` round-3 `winner_id`.
+
+### Photo pipeline — `downscaleImage` + `uploadPlayerPhoto`
+
+`downscaleImage(file, 512, 0.82)` draws to a canvas and `toBlob('image/jpeg')`.
+`uploadPlayerPhoto` uploads to Storage bucket **`player-photos`** as `{playerId}.jpg`
+(`upsert`), then writes `players.photo_url` = public URL + `?v=<ts>` cache-bust.
 
 ---
 
 ## 14.6 Critical Business Assumptions
 
-Future update required:
+Do not change without written approval — each drives multiple engines.
 
-Document all assumptions that must never change without approval.
-
-Known examples:
-
-```text
-League Night and Competition Night cannot occur on the same date.
-
-DIDO Playoff rounds never award season points.
-
-DIDO Playoff rounds never award selection points.
-
-Competition accolades always contribute to player statistics.
-```
-
-Reason:
-
-These rules drive multiple calculation engines throughout the application.
+1. **A league night and a competition night never share a date.** Enforced by the
+   create-night / capture guards, *not* a DB constraint.
+2. **DIDO playoff rounds award no season and no selection points.** They live in
+   `night_playoff_matches`, which the points engine never reads.
+3. **Only DIDO's block phase contributes match points.**
+4. **Accolades always count toward player statistics**, regardless of night type
+   (league or competition).
+5. **Team competitions (Selected/Drawn Doubles, Mixed Triples, Mix Doubles) do NOT feed
+   the Season Log** — only the per-player accolades recorded on those nights do.
+6. **GDF attendance does not feed the Season Log.** "Att Pts" comes from `night_attendance`
+   on `contributes_attendance` nights. The GDF calendar is a standalone federation tracker.
+7. **Season points and selection points use independent date ranges** that may overlap.
+   Same formula: `legsWon + gamesWon×2 + blockBonus`.
+8. **Match formats:** Wednesday = 3 legs/match, most wins (valid 3-0, 2-1). DIDO 4+ player
+   block = 1 leg. DIDO 3-player block = best-of-3. Team comps = games-won based, per
+   `comp_matches`.
+9. **Block POS shown on the sheet has no head-to-head tie-break** (total points then row
+   order). H2H exists only for DIDO seeding / DIDO winner.
+10. **Standings and the Season Log are always recomputed, never stored.**
+11. **Slot model:** a block slot is a scalar player-id for singles and an array for team
+    formats. Always read it through `slotPlayerId()`.
+12. **Access control is client-side.** RLS allows any authenticated user to write any table
+    (`Public read` for anon SELECT + `Auth write <table>` = `FOR ALL TO authenticated USING
+    (true) WITH CHECK (true)` on every public table). `ADMIN_EMAILS` is the only real gate.
+13. **Attribution email** `Alexander.Kloppers@outlook.com` is for commit authorship only.
 
 ---
 
 ## 14.7 Architectural Decision Log
 
-Future update required:
+Format: **Date — Decision — Reason — Impact.**
 
-Maintain a running decision register.
+### 2026-08-14 — Split Season Points and Selection Points date ranges
+Both rankings run independently and can overlap. → `seasons` gained
+`season_points_start/end` + `selection_points_start/end`; `calcPlayerSeasonStats` computes
+two night sets.
 
-Example:
+### 2026-09-01 — Night register + DIDO knockout as first-class data
+Attendance needed for selection; DIDO playoffs must never leak into points. → migrations
+`add_night_attendance`, `add_night_playoff_matches`. `night_playoff_matches` is deliberately
+disjoint from `results`.
 
-### 2026-08-14
+### 2026-09-02 — Team competitions get their own tables
+`results` is player-vs-player (single uuids); pair-vs-pair could not be stored. → migration
+`add_comp_teams` (`comp_teams` + `comp_matches`). Competition entry routes
+`isTeamComp` → `renderDoublesComp`, else `renderBlockEntry`. `nights` gained `end_date`
+(multi-day) + `comp_sessions` (multi-night round-robin).
 
-Decision:
-Separate Season Date Range and Selection Date Range.
+### 2026-09-02 — Night-entry screen rebuilt ("Key West" layout)
+Usability. → new block sheet, draft auto-save, prominent Submit, Schedule Assistant.
+**Side effect / bug:** `openNightEntry` rebuilt every slot as `Array(pps).fill(null)`, so
+singles slots became `["<uuid>"]` and `results.home_player_id` received an array → submit
+crashed (`invalid input syntax for type uuid: "[\"…\"]"`). Fixed 2026-09-03 with
+`slotPlayerId()` unwrap + keeping singles slots scalar in `setBlockSlot`.
 
-Reason:
-Both rankings operate independently and can overlap.
+### 2026-09-03 — "Drawn Doubles" is its own night type
+Initially assumed identical to Selected Doubles; the club corrected it. → new `night_types`
+row `Drawn Doubles` (`e81f3c5d-…`, `counts_match_points=false`); the 27 May night repointed.
 
-Impact:
-seasons table requires separate date fields.
+### 2026-09-03 — Tournament Director granted admin
+`wynandcarelse123@gmail.com` added to `ADMIN_EMAILS`. Also introduced `isAdminEmail()`
+(trim + lowercase + includes) replacing raw `ADMIN_EMAILS.includes`.
 
-Future entries should follow the same structure:
+### 2026-09-03 — `reopenNight()` for locked league nights
+No way to fix a locked Wednesday night (only competitions had Reopen). A pre-`slotPlayerId`
+submit had lost blocks mid-write on the 2026-09-02 night. → `reopenNight` + "Reopen"
+buttons in Night History.
 
-- Date
-- Decision
-- Reason
-- Impact
+### 2026-09-03 — Home screen: per-player accolades, Season + Selection points
+Season Standings last column GP → Selection Points. "Legendary Accolades" regrouped one
+block per player (season-only, sorted by most). `getLegendaryAccolades` →
+`getSeasonAccoladeLeaders`.
 
-Reason:
+### 2026-09-03 — Block leg-cell colours restored to value scheme
+The Key West redesign had swapped to a win/loss heuristic. Restored: `legColor(val)` →
+0 red / 1 yellow / 2 green / 3+ purple, with a legend under the sheet.
 
-Provides historical context for future development decisions.
+### 2026-09-03 — DIDO winner falls back to block standings when there is no playoff
+"Stephen still won it." → `didoNightWinnerId` / `didoStateStandings` (H2H-aware) +
+`getDidoChampions` iterates DIDO nights; Home shout-out + `renderPlayers` badge use it.
+
+### 2026-09-03 — Night Setup lists league nights only
+Locked competition nights were showing in Night History and "View" hung on "Loading…"
+(`renderBlockEntry` needs blocks; comp nights have none). → both lists filter
+`!isCompNight`; the active-night guard routes team comps to `renderDoublesComp`.
+Commit `8a79ef2`.
+
+### 2026-09-03 — GDF attendance redesigned → month-grouped event list
+Was a players × events checkbox matrix. → `renderGdfCalendar` builds a `.nav-tabs` row of
+month tabs (`state.gdfMonth`); each event is a card with removable attendee chips + an
+"add attendee" `<select>` (admin) + delete. `gdf_events` gained an optional End Date on the
+Add form. **Not wired to scoring.** Commits `92d3cc2`, `dd07d89`.
+
+### 2026-09-03 — Players tab: one table, category tabs, ranking column
+Was separate cards per category. → single table, Men / Ladies / Juniors tabs
+(`state.playersTab`); columns Rank · DSA · Nick Name · First · Surname · Status · Cellphone
+· `Profile →`. Rank = position in `getStandings` for that tab; unranked show "—".
+New `players.nickname` column (migration `add_players_nickname`). Commit `a6fe4ec`.
+
+### 2026-09-03 — Full player profile page; Edit Player modal retired
+The `Profile →` button opens `renderPlayerProfile` (sets `state.profilePlayerId`;
+`renderPlayers` returns the profile while it's set). Sections: photo, summary tiles,
+details, career/season accolade table, darts setup, competition wins (outright only), GDF
+events. **Editing moved onto the profile** (inline `startProfileEdit` → `saveProfileEdit`
+→ `savePlayer`); `openEditPlayer` now redirects there; delete moved onto the profile.
+New: `players.photo_url` + `dart_brand`/`dart_model`/`dart_weight_g`/`dart_notes`
+(migration `player_profile_fields`); public Storage bucket **`player-photos`** (public read
+policy + authenticated write policy, 3 MB, jpeg/png/webp). Photos downscaled to 512 px
+client-side. Commit `35abdca`. Design mockup:
+`https://claude.ai/code/artifact/ab0d2775-a76c-4200-bdcb-41b50387d69f`.
+
+### Migration ledger (Supabase, CJDA-relevant)
+
+```
+20260901205955  add_night_attendance
+20260901220151  add_night_playoff_matches
+20260902153310  add_comp_teams
+20260902155438  nights_end_date_and_comp_sessions
+20260903184031  add_players_nickname
+20260903191343  player_profile_fields
++ execute_sql (not migrations):  Drawn Doubles night_types row · player-photos storage bucket + policies
+```
 
 ---
 
 ## 14.8 Known Issues Register
 
-Future update required:
-
-Track unresolved production issues.
-
-Template:
-
-```text
-Issue:
-Description
-
-Impact:
-Low / Medium / High
-
-Workaround:
-Current workaround
-
-Status:
-Open / In Progress / Resolved
-```
-
-Reason:
-
-Avoid losing knowledge between development sessions.
+| Issue | Impact | Workaround / Status |
+|---|---|---|
+| `base_selection_points` is added to **seasonPoints** (not selectionPoints); `base_attendance_points` looks unused. | Low | **Open** — confirm intent with the club before "fixing". |
+| `night_types.contributes_selection` is defined but unused — `calcPlayerSeasonStats` keys selection nights off `counts_match_points`. | Low | **Open** — harmless today (both league types have it `true`); revisit if a selection-only night type is ever wanted. |
+| RLS lets any authenticated user write any table; the viewer restriction is client-side only. | Medium | **Open (accepted)** — acceptable for the current trusted user base. Would need per-table policies + a role claim to harden. |
+| Missing Wednesday league nights: **2026-01-28, 2026-03-25, 2026-06-03, 2026-07-15**. | Low | **Open** — unconfirmed whether played. All other Wednesdays 12 Nov 2025 → 2 Sep 2026 are captured; Dec/early-Jan + 1 Apr (Easter) were scheduled breaks. |
+| Perfect 3-way cycle blocks: the app shows 1/2/3, the paper sheet marks all Pos 1. | Cosmetic | **Won't fix** — `getBlockPositions` cannot represent a tie; totals are identical so nothing downstream is wrong. |
+| Singles competitions (CoC / Home Alone / Open) have no data and only playoff-final winner detection in `playerCompWins`. | Low | **Open** — revisit if those competitions are ever run. |
+| 2026-09-02 night lost blocks 4 & 5 during a pre-`slotPlayerId` submit crash. | — | **Resolved** — reopened + re-entered; `slotPlayerId` fix shipped. |
+| Home "Competition Results" used to hide older competitions (grouped by type, latest only). | — | **Resolved** `a25ca67` — now one column per completed competition. |
 
 ---
 
 ## 14.9 Lessons Learned
 
-Future update required:
+### RLS / grants incident (original)
+Data appeared empty everywhere → missing Supabase grants. Explicit `GRANT` statements added
+for every role. **Lesson:** check permissions before debugging front-end logic.
 
-Record significant technical discoveries.
+### The uuid-array slot bug (Key West redesign)
+A layout refactor rebuilt all block slots as arrays, so singles `results.home_player_id`
+got `["<uuid>"]` and Postgres rejected it on submit. **Lesson:** the block slot data model
+is polymorphic (scalar vs array) — every read must go through `slotPlayerId()`, and any
+code that *builds* slots must keep singles scalar.
 
-Example:
+### `execute_sql` DO-block batches
+When capturing historical nights via `mcp__…__execute_sql`, only the **last** `SELECT` in
+the batch returns rows, and **a failing trailing SELECT rolls back the whole batch**
+(including the DO block). Run the DML and the verification SELECT as separate statements.
+Resolve UUIDs by lookup (`select id … where lower(first_name)=…`) rather than pasting them —
+hand-transcribed UUIDs caused several failed inserts.
 
-### RLS Permissions Incident
+### Historical score-sheet capture discipline
+Always (a) parse the matrix and reconcile every GW / LW / total on the sheet with a script
+**before** inserting, (b) show the club the name→player matches, (c) re-derive standings
+with a SELECT **after** inserting and confirm they match. Sheets contain arithmetic slips —
+the app recomputes from the matrix, so enter the matrix, not the printed totals, and flag
+the slip.
 
-Problem:
-Data appeared empty throughout the application.
-
-Cause:
-Missing Supabase grants.
-
-Resolution:
-Explicit GRANT statements added for all required roles.
-
-Lesson:
-Check permissions before debugging frontend logic.
-
-Reason:
-
-Can save hours of repeated troubleshooting.
+### Headless-Edge render harness
+Every change to `index.html` is verified by splicing the inline script into a stub page
+(`window.supabase` faked), calling the `render*()` functions with hand-built `state`, and
+asserting on the HTML string — no live browser, no Supabase round-trip. The inline script
+is lines 123 → `</script>−1`; getting that range wrong yields "Illegal return statement".
 
 ---
 
 ## 14.10 Domain Glossary
 
-Future update required:
+**Season Points** — prize-giving standings. `Σ(legsWon + gamesWon×2 + blockBonus)` over
+`counts_match_points` nights within the season-points date range (+ `base_selection_points`).
 
-Document all CJDA terminology.
+**Selection Points** — national-team selection. Same formula, over the selection date range.
 
-Examples:
+**Attendance Points** — count of `contributes_attendance` nights the player played in the
+season-points range (from `results` presence, plus the `night_attendance` register).
 
-### Season Points
+**Block** — a round-robin group of 3–8 players on a league night. Everyone plays everyone;
+`bonus` is added to every player in the block.
 
-Used for:
-- Prize Giving Standings
+**Block bonus** — flat points added to all players in a block (e.g. a 3-player block on a
+short night).
 
-Formula:
-(GW × 2) + Legs
+**Walkout** — a match recorded `0–0`; ignored by the points engine.
 
-### Selection Points
+**DIDO** — "Double In / Double Out". A competition night = **block phase** (contributes
+match points) + **playoff phase** (`night_playoff_matches`, 8-seed knockout, no points).
+4+ player blocks play 1 leg; 3-player blocks best-of-3.
 
-Used for:
-- National Team Selection
+**Selected Doubles / Drawn Doubles / Mixed Triples / Mix Doubles** — team round-robin club
+competitions (`comp_teams` + `comp_matches`), sometimes over several nights
+(`comp_sessions`). Team total = `legsWon + gamesWon×2 + bonus`. Do not feed the Season Log.
+"Selected" = players choose partners; "Drawn" = partners randomly drawn.
 
-Formula:
-(GW × 2) + Legs
+**Accolade** — an honorary achievement (180, 171, 170 Big Fish, 9 Darter, High Close ≥ 90,
+< 15 Dart, 5/6 Bulls). Recorded per occurrence in `accolades`. Never worth league points,
+but always counted in player statistics and on the Home "Legendary Accolades" card.
 
-### DIDO
+**High Close (H/C)** — a checkout above `space_config.min_high_close` (90). Stored with its
+value; `170_close` ("Big Fish") is its own type.
 
-Competition format consisting of:
+**Career vs YTD / Season** — Career = `base_career_* + this season`. YTD/Season = within the
+active season's points range.
 
-- Block Phase
-- Playoff Phase
+**GDF Calendar** — attendance register for Gauteng Darts Federation events
+(`event_type` `johannesburg` / `gauteng` / `wednesday`). **Not** a scoring input.
 
-Only Block Phase contributes match points.
+**Registered vs Temp player** — `status`. Temp = a guest/fill-in not on the official roster;
+still fully scored. The Season Log shows registered players only; the Players tab shows both.
 
-### GDF Calendar
-
-Attendance tracking mechanism for federation events.
-
-Reason:
-
-Allows future developers and AI assistants to immediately understand the domain language used throughout the project.
+**Space** — the multi-tenant unit on the Darts Nexus platform. CJDA is one space
+(`SPACE_ID`). Every CJDA row is scoped by `space_id`.
 
 ---
 
-## 14.11 Target State of Handover
+## 14.11 Target State
 
-Goal:
+A developer (or AI session) resuming cold should be able to, from this file alone:
+understand the business rules, the schema, where each feature lives in `index.html`, the
+night-submission data flow, the historical decisions, and the open issues — and fix a bug
+without extra onboarding.
 
-This document should eventually contain enough information that a developer can:
-
-- Understand CJDA business rules.
-- Understand database architecture.
-- Understand repository structure.
-- Understand data flow.
-- Understand historical decisions.
-- Understand known issues.
-- Resume development after months away from the project.
-- Assist with bug fixing without requiring additional onboarding.
-
-Current assessment:
-
-Business Documentation: 9/10
-Technical Documentation: 6/10
-
-Target:
-
-Business Documentation: 10/10
-Technical Documentation: 10/10
+**Current:** Business 9/10 · Technical 9/10.
+**Remaining for 10/10 technical:** a generated ER diagram; per-function input/output tables
+for the render layer; a documented deployment/hosting path for `index.html`; and resolution
+of the `base_*` points questions in §14.8.
