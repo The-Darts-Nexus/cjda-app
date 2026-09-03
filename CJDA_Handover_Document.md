@@ -138,11 +138,11 @@ All CJDA tables carry `space_id` (always `SPACE_ID`) + `created_at`. RLS: see §
 `base_career_171s`, `base_career_170s`, `base_career_hc_count`.
 The `base_*` columns are pre-app career totals folded into the calculated figures.
 
-**`app_admins`** — `(user_id, space_id)` PK. The DB source of truth for who administers which
-space. Read policy: authenticated. **No write policy** — changed only via SQL / service role.
-CJDA rows: Alexander (superadmin), Wynie (TD), dartsnexus@outlook.com (platform).
-`is_space_admin(space_id)` also honours a hard-coded CJDA email allowlist (same three) so a
-fresh admin works before being seeded.
+**`app_admins`** — `(user_id, space_id)` PK. Per-space admins. Read policy: authenticated.
+**No write policy** — changed only via SQL / service role. CJDA rows: Alexander (superadmin),
+Wynie (TD). The platform super-user (`dartsnexus@outlook.com`) is *not* a row here — it's
+handled by `is_platform_superadmin()` and is admin of every space. `is_space_admin()` also
+honours a 2-address CJDA email allowlist (Alexander, Wynie) so a fresh admin works pre-seed.
 
 **`seasons`** — `name`*, `start_date`*, `end_date`, `is_active`, plus **two independent date
 ranges**: `season_points_start/end` (prize-giving) and `selection_points_start/end`
@@ -325,10 +325,13 @@ Outright winners only: winning `comp_teams` row of a locked team comp (from
 - **`resolveIdentity()`** (client) — after auth: admin? (`is_app_admin` RPC or `ADMIN_EMAILS`).
   Then find the linked `players` row (`auth_user_id = auth.uid()`), or `link_my_player()` to
   link by email. Sets `state.role` + `state.myPlayerId`.
-- **`is_space_admin(p_space_id)`** — `exists(app_admins where user_id = auth.uid() and space_id
-  = p_space_id)` OR (CJDA space + email in the hard-coded allowlist). Every CJDA write policy is
-  `USING (is_space_admin(space_id))` — a CJDA admin can only write CJDA rows. `is_app_admin()`
-  is a back-compat wrapper = `is_space_admin('00ca89b5-…')`.
+- **`is_platform_superadmin()`** — `auth.uid() = <dartsnexus uid>` OR jwt email
+  `dartsnexus@outlook.com`. The platform owner's account — admin of **every** space, always.
+- **`is_space_admin(p_space_id)`** — `is_platform_superadmin()` OR `exists(app_admins where
+  user_id = auth.uid() and space_id = p_space_id)` OR (CJDA space + email in the 2-address CJDA
+  allowlist: Alexander, Wynie). Every CJDA write policy is `USING (is_space_admin(space_id))` —
+  a per-space admin can only write that space's rows; the platform super-user writes anything.
+  `is_app_admin()` is a back-compat wrapper = `is_space_admin('00ca89b5-…')`.
 - **`link_my_player(p_space_id)`** — one-time: links the caller to an unclaimed `players` row
   **in that space** whose `email` matches the JWT email. Raises `NO_PLAYER_FOR_EMAIL` if none.
 - **`save_my_profile(patch jsonb)`** — updates **only** `nickname / phone / email / dart_brand /
@@ -481,10 +484,12 @@ direct table write, `save_my_profile` touches only whitelisted fields; admin = f
 global `app_admins` + email allowlist that wrongly included `fishontackle13@gmail.com` (a Key
 West admin). → `app_admins` gained `space_id` (PK `(user_id, space_id)`); `is_space_admin(uuid)`
 replaces `is_app_admin()` in every policy (`USING (is_space_admin(space_id))`); `link_my_player`
-takes `p_space_id`; `signUp()` + `resolveIdentity()` filter `players` by `SPACE_ID`. CJDA admins
-= Alexander, Wynie, dartsnexus@outlook.com. Migrations `space_scope_admins`,
-`link_my_player_space_scoped`. Verified: other-space admin → 0 rows on CJDA writes;
-`fishontackle13` → `is_app_admin()` false.
+takes `p_space_id`; `signUp()` + `resolveIdentity()` filter `players` by `SPACE_ID`. CJDA
+per-space admins = Alexander, Wynie. `dartsnexus@outlook.com` is the **platform super-user**
+(`is_platform_superadmin()`, `OR`-ed into `is_space_admin`) — admin of every space, always;
+not an `app_admins` row. Migrations `space_scope_admins`, `link_my_player_space_scoped`,
+`platform_superadmin`. Verified: other-space admin → 0 rows on CJDA writes; `fishontackle13` →
+not admin; `dartsnexus` → admin of CJDA and any other space.
 
 ### 2026-09-03 — Profile Save writes an explicit field whitelist
 `saveProfileEdit` used to `savePlayer({...profileDraft})`, and `savePlayer`'s update path
@@ -511,6 +516,7 @@ Commit `5b9a3c9`.
 20260903......  player_self_service_rpcs   (link_my_player, save_my_profile, set_my_photo)
 20260903......  space_scope_admins         (app_admins.space_id, is_space_admin(uuid), policies re-pointed)
 20260903......  link_my_player_space_scoped
+20260903......  platform_superadmin        (is_platform_superadmin() — dartsnexus@outlook.com, admin everywhere)
 + execute_sql (not migrations):  Drawn Doubles night_types row · player-photos bucket + policies
                                  (bucket write policy re-scoped to admin-or-own after the lockdown)
 ```
