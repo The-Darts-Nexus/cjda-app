@@ -176,6 +176,7 @@ const state = {
   // UI
   modal: null,
   activeStandingsTab: 'men', // men | ladies | juniors
+  playersTab: 'men',         // men | ladies | juniors — Players tab category filter
   selectedPlayerId: null,
   // Forms
   authEmail: '',
@@ -2768,13 +2769,59 @@ function renderSeasonLog() {
 }
 
 
+function openPlayerProfile(id) {
+  // Placeholder — full player profiles to be unpacked later.
+  showToast('Player profiles — coming soon');
+}
+
 function renderPlayers() {
-  const cats = ['men','ladies','junior_boy','junior_girl'];
-  const catLabel = { men:'Men', ladies:'Ladies', junior_boy:'Junior (Boy)', junior_girl:'Junior (Girl)' };
-  const grouped = {};
-  cats.forEach(c => { grouped[c] = state.players.filter(p => p.category === c); });
-  const didoWins = {};
-  getDidoChampions().forEach(c => { didoWins[c.playerId] = (didoWins[c.playerId] || 0) + 1; });
+  const tabs = [
+    { id: 'men', label: 'Men', cats: ['men'] },
+    { id: 'ladies', label: 'Ladies', cats: ['ladies'] },
+    { id: 'juniors', label: 'Juniors', cats: ['junior_boy', 'junior_girl'] },
+  ];
+  const active = tabs.find(t => t.id === state.playersTab) || tabs[0];
+
+  // Current ranking = position in the Season Log standings for this tab (by Season Points).
+  const rankMap = {};
+  const ranked = active.cats.length === 1
+    ? getStandings(active.cats[0])
+    : active.cats.flatMap(c => getStandings(c)).sort((a, b) => b.seasonPoints - a.seasonPoints || a.last_name.localeCompare(b.last_name));
+  ranked.forEach((p, i) => { rankMap[p.id] = i + 1; });
+
+  const surname = (p) => (p.last_name || '').toLowerCase();
+  const roster = state.players
+    .filter(p => active.cats.includes(p.category))
+    .sort((a, b) => {
+      const ra = rankMap[a.id], rb = rankMap[b.id];
+      if (ra && rb) return ra - rb;
+      if (ra) return -1;
+      if (rb) return 1;
+      return surname(a).localeCompare(surname(b)) || (a.first_name || '').localeCompare(b.first_name || '');
+    });
+
+  const th = `padding:6px 8px;text-align:left;color:var(--text-muted);font-size:0.66rem;letter-spacing:0.06em;text-transform:uppercase;border-bottom:1px solid var(--border);white-space:nowrap`;
+  const td = `padding:5px 8px;border-bottom:1px solid var(--border);font-size:0.76rem;white-space:nowrap`;
+
+  const rows = roster.map((p, i) => {
+    const rk = rankMap[p.id];
+    return `
+      <tr style="${i % 2 === 0 ? '' : 'background:rgba(45,106,45,0.05)'}">
+        <td style="${td};text-align:center;font-weight:700;color:${rk ? 'var(--green-accent)' : 'var(--text-muted)'}">${rk || '—'}</td>
+        <td style="${td};font-family:'Share Tech Mono',monospace;font-size:0.7rem;color:var(--text-muted)">${p.dsa_number || '—'}</td>
+        <td style="${td};color:var(--text-muted)">${p.nickname || '—'}</td>
+        <td style="${td};font-weight:600">${p.first_name || '—'}</td>
+        <td style="${td};font-weight:600">${p.last_name || '—'}</td>
+        <td style="${td}"><span class="pill pill-${p.status}">${p.status || '—'}</span></td>
+        <td style="${td};font-family:'Share Tech Mono',monospace;font-size:0.72rem;color:var(--text-muted)">${p.phone || '—'}</td>
+        <td style="${td};text-align:right">
+          <div style="display:inline-flex;gap:4px">
+            ${isAdmin() ? `<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openEditPlayer('${p.id}')">Edit</button>` : ''}
+            <button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openPlayerProfile('${p.id}')">Profile</button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
 
   return `
     <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
@@ -2782,35 +2829,35 @@ function renderPlayers() {
         <div style="display:flex;justify-content:flex-end">
           <button class="btn btn-primary" onclick="openAddPlayer()">+ Add Player</button>
         </div>` : ''}
-      ${cats.map(cat => !grouped[cat].length ? '' : `
-        <div class="card" style="overflow:hidden">
-          <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">${catLabel[cat]}</div>
-            <div style="font-size:0.68rem;color:var(--text-muted)">${grouped[cat].length} players</div>
+
+      <div class="card" style="overflow:hidden">
+        <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">PLAYERS</div>
+          <div style="font-size:0.68rem;color:var(--text-muted)">${roster.length} ${active.label.toLowerCase()}</div>
+        </div>
+        <div style="padding:6px 8px">
+          <div class="tab-group">
+            ${tabs.map(t => `<div class="tab-btn ${active.id === t.id ? 'active' : ''}" onclick="state.playersTab='${t.id}';render()">${t.label}</div>`).join('')}
           </div>
-          <div style="overflow-x:auto">
-            <table class="data-table">
-              <thead><tr>
-                <th>Name</th>
-                <th>DSA #</th>
-                <th>Status</th>
-                <th>Email</th>
-                ${isAdmin() ? '<th></th>' : ''}
-              </tr></thead>
-              <tbody>
-                ${grouped[cat].map(p => `
-                  <tr>
-                    <td style="font-weight:600">${p.first_name} ${p.last_name}${didoWins[p.id] ? ` <span class="acc-badge acc-170" style="font-size:0.6rem">🏆 DIDO ×${didoWins[p.id]}</span>` : ''}</td>
-                    <td class="mono" style="font-size:0.72rem;color:var(--text-muted)">${p.dsa_number || '—'}</td>
-                    <td><span class="pill pill-${p.status}">${p.status}</span></td>
-                    <td style="color:var(--text-muted);font-size:0.72rem">${p.email || '—'}</td>
-                    ${isAdmin() ? `<td><button class="btn btn-ghost" style="padding:2px 8px;font-size:0.7rem" onclick="openEditPlayer('${p.id}')">Edit</button></td>` : ''}
-                  </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>`).join('')}
-      ${!state.players.length ? `<div class="card" style="padding:24px;text-align:center;color:var(--text-muted)">No players registered yet.</div>` : ''}
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--green-dark)">
+              <th style="${th};text-align:center">Rank</th>
+              <th style="${th}">DSA&nbsp;Number</th>
+              <th style="${th}">Nick&nbsp;Name</th>
+              <th style="${th}">First&nbsp;Name</th>
+              <th style="${th}">Surname</th>
+              <th style="${th}">Status</th>
+              <th style="${th}">Cellphone&nbsp;Number</th>
+              <th style="${th};text-align:right"></th>
+            </tr></thead>
+            <tbody>
+              ${roster.length ? rows : `<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--text-muted);font-size:0.78rem">No ${active.label.toLowerCase()} players.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>`;
 }
 
@@ -3593,7 +3640,7 @@ function renderConfig() {
 // PLAYER MODAL
 // ═══════════════════════════════════════════════
 function openAddPlayer() {
-  state.modal = { mode: 'add', data: { first_name:'', last_name:'', category:'men', status:'registered', dsa_number:'', email:'', phone:'' } };
+  state.modal = { mode: 'add', data: { first_name:'', last_name:'', nickname:'', category:'men', status:'registered', dsa_number:'', email:'', phone:'' } };
   render();
 }
 function openEditPlayer(id) {
@@ -3733,6 +3780,10 @@ function renderModal() {
               <label class="form-label">Last Name *</label>
               <input class="form-input" value="${d.last_name||''}" oninput="updateModalField('last_name',this.value)" placeholder="Last name">
             </div>
+          </div>
+          <div>
+            <label class="form-label">Nick Name</label>
+            <input class="form-input" value="${d.nickname||''}" oninput="updateModalField('nickname',this.value)" placeholder="Nickname / alias">
           </div>
           <div>
             <label class="form-label">Category *</label>
