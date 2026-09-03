@@ -151,6 +151,7 @@ const state = {
   blockPlayers: [],          // all block_players
   gdfEvents: [],             // GDF calendar events
   gdfAttendance: [],         // GDF attendance records
+  gdfMonth: null,            // selected month tab ("YYYY-MM") in the GDF attendance list
   competitionNightId: null,  // active competition night
   compTab: 'list',           // list | entry | view
   activeNight: null,        // night being worked on
@@ -410,17 +411,36 @@ function fmtGdfDate(startStr, endStr) {
   return sd + ' ' + sm + ' - ' + ed + ' ' + em;
 }
 
-// Event-centric attendance list: one card per GDF event (newest first) with its attendees
-// as removable name chips + an "add attendee" picker for admins.
+// Attendance list grouped by month: a month-tab row up top, then a card per GDF event
+// in the selected month (attendees as removable chips + an "add attendee" picker for admins).
 function renderGdfCalendar() {
-  const events = (state.gdfEvents || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  if (!events.length) {
+  const allEvents = (state.gdfEvents || []).slice();
+  if (!allEvents.length) {
     return `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.78rem">No GDF events yet.${isAdmin() ? ' Use <strong>+ Add Event</strong> above to create one.' : ''}</div>`;
   }
   const admin = isAdmin();
   const pname = (p) => (p.first_name + ' ' + (p.last_name || '')).trim();
   const byName = (a, b) => pname(a).localeCompare(pname(b));
   const allPlayers = (state.players || []).slice().sort(byName);
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthKey = (d) => (d || '').slice(0, 7);                       // "2026-09"
+  const monthLabel = (k) => { const [y, m] = k.split('-'); return MONTHS[+m - 1] + ' ' + y; };
+  const months = [...new Set(allEvents.map(e => monthKey(e.date)))].filter(Boolean).sort().reverse();
+  if (!months.includes(state.gdfMonth)) state.gdfMonth = months[0];
+  const activeMonth = state.gdfMonth;
+
+  const monthTabs = `
+    <div class="nav-tabs" style="margin-bottom:10px;border-bottom:1px solid var(--border)">
+      ${months.map(k => {
+        const n = allEvents.filter(e => monthKey(e.date) === k).length;
+        return `<div class="nav-tab ${k === activeMonth ? 'active' : ''}" onclick="state.gdfMonth='${k}';render()">${monthLabel(k)} <span style="opacity:0.55;font-size:0.72rem">(${n})</span></div>`;
+      }).join('')}
+    </div>`;
+
+  const events = allEvents
+    .filter(e => monthKey(e.date) === activeMonth)
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   const typePill = (t) => {
     const map = {
@@ -475,7 +495,10 @@ function renderGdfCalendar() {
       </div>`;
   }).join('');
 
-  return `<div style="display:flex;flex-direction:column;gap:8px;padding:4px">${cards}</div>`;
+  return `<div style="padding:4px">
+    ${monthTabs}
+    <div style="display:flex;flex-direction:column;gap:8px">${cards || `<div style="padding:14px;text-align:center;color:var(--text-muted);font-size:0.76rem">No events in ${monthLabel(activeMonth)}.</div>`}</div>
+  </div>`;
 }
 
 async function toggleGdfAttendance(eventId, playerId, attended) {
@@ -545,6 +568,7 @@ async function saveGdfEvent() {
   });
   if (error) { showToast(error.message,'error'); return; }
   showToast('GDF Event added');
+  state.gdfMonth = d.date.slice(0, 7);   // jump the month tabs to the new event
   state.modal = null;
   await loadAllData();
 }
