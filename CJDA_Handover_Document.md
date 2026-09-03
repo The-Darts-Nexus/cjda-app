@@ -16,7 +16,7 @@
 | **Front end** | Tailwind Play CDN + `@supabase/supabase-js@2` (UMD). One inline `<script>` from line ~122. |
 | **State** | One global `const state = {…}`. `render()` rebuilds `#root.innerHTML` on every change (full re-render). |
 | **Backend** | Supabase project `zsynlrutfkdjmmyznhst`. All data scoped to one space (`SPACE_ID = 00ca89b5-86f4-4c46-b853-0503796769de`, "Central Johannesburg Darts Association"). |
-| **Auth** | `sb.auth` email + password. `ADMIN_EMAILS` (hard-coded array, line ~131) → role `admin`; any other signed-in user → `viewer`; not signed in → `guest`. |
+| **Auth** | `sb.auth` email + password. Roles: `admin` (in `app_admins` **or** the `ADMIN_EMAILS` list) · `player` (auth user linked to a `players` row via `auth_user_id`) · `viewer` (signed in, not linked) · `guest`. Resolved by `resolveIdentity()` on every sign-in / session restore. Sign-up is invite-only — the email must already sit on an unclaimed `players` row. |
 | **Repo** | `main` only, direct commits. `index.html`, `README.md`, this file. Commits co-authored by Claude. |
 | **Reference IDs** | Season "2026 Season" `2ca00843-…`; game type 501 `95b17ec3-…`; space `00ca89b5-…`. Night-type IDs in §14.3. |
 
@@ -37,7 +37,7 @@ sections of the inline script. Approximate map (line numbers drift — search by
 | Config + Supabase init | 122–140 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPACE_ID`, `ADMIN_EMAILS`, `isAdminEmail()`, `sb` client |
 | App state | 141–190 | the `state` object (see §14.2) |
 | Utilities | 190–215 | `isAdmin`, `showToast`, `formatDate`, `ordinal` |
-| Auth | 216–247 | `signIn`, `signUp`, `signOut` |
+| Auth | 214–300 | `resolveIdentity` (role + linked player), `signIn`, `signUp` (invite-gated), `requestPasswordReset`, `signOut`, `isAdmin`/`isPlayer`/`canEditProfile` |
 | Data loading | 248–276 | `loadAllData()` — one bulk fetch of every table the app uses |
 | Competition helpers | 309–396 | `isCompNight`, `getCompNights`, `isTeamComp`, `compTeamsFor`, `compMatchesFor`, `getDoublesStandings`, `getDoublesWinner`, `getCompStandings` |
 | GDF attendance | 402–592 | `fmtGdfDate`, `renderGdfCalendar`, `toggleGdfAttendance`, `saveGdfEvent`, `deleteGdfEvent` |
@@ -124,9 +124,15 @@ All CJDA tables carry `space_id` (always `SPACE_ID`) + `created_at`. RLS: see §
 `dsa_number`, `id_number`, `first_name`*, `last_name`*, `category`* (`men` \| `ladies` \|
 `junior_boy` \| `junior_girl`), `status` (`registered` \| `temp`, default `temp`), `email`,
 `phone`, `nickname`, `photo_url`, `dart_brand`, `dart_model`, `dart_weight_g`, `dart_notes`,
+`auth_user_id` (unique — links to `auth.users`; set by `link_my_player()`),
 `base_selection_points`, `base_attendance_points`, `highest_close`, `base_career_180s`,
 `base_career_171s`, `base_career_170s`, `base_career_hc_count`.
 The `base_*` columns are pre-app career totals folded into the calculated figures.
+
+**`app_admins`** — `user_id` (PK, = `auth.users.id`). The DB source of truth for who is an
+admin. Read policy: authenticated. **No write policy** — changed only via SQL / service role.
+`is_app_admin()` also honours a hard-coded email allowlist so a fresh admin works before they're
+seeded.
 
 **`seasons`** — `name`*, `start_date`*, `end_date`, `is_active`, plus **two independent date
 ranges**: `season_points_start/end` (prize-giving) and `selection_points_start/end`
@@ -301,7 +307,23 @@ Outright winners only: winning `comp_teams` row of a locked team comp (from
 
 `downscaleImage(file, 512, 0.82)` draws to a canvas and `toBlob('image/jpeg')`.
 `uploadPlayerPhoto` uploads to Storage bucket **`player-photos`** as `{playerId}.jpg`
-(`upsert`), then writes `players.photo_url` = public URL + `?v=<ts>` cache-bust.
+(`upsert`), then persists via `setPhotoUrl()` — direct `players.photo_url` update for admins,
+`set_my_photo()` RPC for a player editing their own. URL is public + `?v=<ts>` cache-bust.
+
+### Auth / self-service — `resolveIdentity` + the SECURITY DEFINER RPCs
+
+- **`resolveIdentity()`** (client) — after auth: admin? (`is_app_admin` RPC or `ADMIN_EMAILS`).
+  Then find the linked `players` row (`auth_user_id = auth.uid()`), or `link_my_player()` to
+  link by email. Sets `state.role` + `state.myPlayerId`.
+- **`is_app_admin()`** — `exists(app_admins where user_id = auth.uid())` OR email in a hard-coded
+  allowlist. Used by every table's write policy.
+- **`link_my_player()`** — one-time: links the caller to an unclaimed `players` row whose
+  `email` matches the JWT email. Raises `NO_PLAYER_FOR_EMAIL` if none.
+- **`save_my_profile(patch jsonb)`** — updates **only** `nickname / phone / email / dart_brand /
+  dart_model / dart_weight_g / dart_notes` on the caller's own row. A key absent from `patch` is
+  left unchanged; an empty-string value clears it. Never category / status / DSA / name / points.
+- **`set_my_photo(url text)`** — sets `photo_url` on the caller's own row.
+- `signUp()` (client) is gated: the email must be on an unclaimed `players` row or it's refused.
 
 ---
 
@@ -330,9 +352,15 @@ Do not change without written approval — each drives multiple engines.
 10. **Standings and the Season Log are always recomputed, never stored.**
 11. **Slot model:** a block slot is a scalar player-id for singles and an array for team
     formats. Always read it through `slotPlayerId()`.
-12. **Access control is client-side.** RLS allows any authenticated user to write any table
-    (`Public read` for anon SELECT + `Auth write <table>` = `FOR ALL TO authenticated USING
-    (true) WITH CHECK (true)` on every public table). `ADMIN_EMAILS` is the only real gate.
+12. **Writes are DB-enforced admin-only.** Every CJDA table: `Public read` (anon SELECT) +
+    `<table> admin write` (`FOR ALL TO authenticated USING (is_app_admin())`). `anon` has no
+    write grant at all. A **player** can change nothing except the seven self-service fields on
+    **their own** `players` row, and only through `save_my_profile()` / `set_my_photo()`
+    (`SECURITY DEFINER`, keyed on `auth.uid()`). The `player-photos` bucket write policy
+    likewise restricts a non-admin to their own `{playerId}.jpg`. The client role checks
+    (`isAdmin`, `canEditProfile`) are the UX layer; the DB is the real gate.
+    (Platform tables outside CJDA — `opens_*`, `accolades_config`, `space_accolades` — still
+    carry the old blanket `Auth write` policies; out of scope here.)
 13. **Attribution email** `Alexander.Kloppers@outlook.com` is for commit authorship only.
 
 ---
@@ -420,6 +448,21 @@ policy + authenticated write policy, 3 MB, jpeg/png/webp). Photos downscaled to 
 client-side. Commit `35abdca`. Design mockup:
 `https://claude.ai/code/artifact/ab0d2775-a76c-4200-bdcb-41b50387d69f`.
 
+### 2026-09-03 — Self-registering players: linking, `player` role, RLS lockdown
+Players will register in the app. Hard rule: **a player may edit nothing but their own player
+profile.** → `players.auth_user_id` + `app_admins` table + `is_app_admin()`. All 16 CJDA table
+write policies rebuilt from `Auth write (true)` to `<t> admin write (is_app_admin())` — public
+read unchanged. Player self-service via three `SECURITY DEFINER` RPCs
+(`link_my_player`, `save_my_profile`, `set_my_photo`); `player-photos` storage write scoped to
+own file. Client: `state.role` gains `player`; `state.myPlayerId`; `resolveIdentity()` replaces
+the inline `isAdminEmail` role assignment on sign-in + session restore; `signUp()` invite-gated;
+`canEditProfile(id)`; a top-right **account menu** (`renderAccountMenu` — avatar → Edit my
+profile / theme / refresh / sign out) replaces the loose header buttons; the player profile
+renders name/DSA/category/status read-only for a player editing their own. Migrations
+`player_auth_linking`, `rls_admin_write_lockdown`, `player_self_service_rpcs` + an `execute_sql`
+for the storage policy. Verified: anon = no write grant; linked non-admin = 0 rows on every
+direct table write, `save_my_profile` touches only whitelisted fields; admin = full write.
+
 ### 2026-09-03 — Profile Save writes an explicit field whitelist
 `saveProfileEdit` used to `savePlayer({...profileDraft})`, and `savePlayer`'s update path
 spreads every key of the object. A photo uploaded *after* clicking Edit updated
@@ -440,7 +483,11 @@ Commit `5b9a3c9`.
 20260902155438  nights_end_date_and_comp_sessions
 20260903184031  add_players_nickname
 20260903191343  player_profile_fields
-+ execute_sql (not migrations):  Drawn Doubles night_types row · player-photos storage bucket + policies
+20260903......  player_auth_linking        (players.auth_user_id, app_admins, is_app_admin())
+20260903......  rls_admin_write_lockdown   (all 16 CJDA tables: admin-only writes)
+20260903......  player_self_service_rpcs   (link_my_player, save_my_profile, set_my_photo)
++ execute_sql (not migrations):  Drawn Doubles night_types row · player-photos bucket + policies
+                                 (bucket write policy re-scoped to admin-or-own after the lockdown)
 ```
 
 ---
@@ -451,7 +498,9 @@ Commit `5b9a3c9`.
 |---|---|---|
 | `base_selection_points` is added to **seasonPoints** (not selectionPoints); `base_attendance_points` looks unused. | Low | **Open** — confirm intent with the club before "fixing". |
 | `night_types.contributes_selection` is defined but unused — `calcPlayerSeasonStats` keys selection nights off `counts_match_points`. | Low | **Open** — harmless today (both league types have it `true`); revisit if a selection-only night type is ever wanted. |
-| RLS lets any authenticated user write any table; the viewer restriction is client-side only. | Medium | **Open (accepted)** — acceptable for the current trusted user base. Would need per-table policies + a role claim to harden. |
+| ~~RLS lets any authenticated user write any table~~ | — | **Resolved 2026-09-03** — all CJDA tables are admin-only writes (`is_app_admin()`); players get self-service RPCs only. Platform tables (`opens_*` etc.) still open — out of scope. |
+| `fishontackle13@gmail.com` is in the admin email allowlist but has no `auth.users` row / `app_admins` seed yet. | Low | **Open** — works via the `is_app_admin()` allowlist the moment they sign up; add to `app_admins` then. |
+| ~19 early auth accounts exist with no linked player (public sign-up was open before the invite gate). | Low | **Open** — they're plain `viewer`s and can't write anything. They auto-link if the TD later puts their email on a `players` row. |
 | Missing Wednesday league nights: **2026-01-28, 2026-03-25, 2026-06-03, 2026-07-15**. | Low | **Open** — unconfirmed whether played. All other Wednesdays 12 Nov 2025 → 2 Sep 2026 are captured; Dec/early-Jan + 1 Apr (Easter) were scheduled breaks. |
 | Perfect 3-way cycle blocks: the app shows 1/2/3, the paper sheet marks all Pos 1. | Cosmetic | **Won't fix** — `getBlockPositions` cannot represent a tie; totals are identical so nothing downstream is wrong. |
 | Singles competitions (CoC / Home Alone / Open) have no data and only playoff-final winner detection in `playerCompWins`. | Low | **Open** — revisit if those competitions are ever run. |
@@ -537,6 +586,12 @@ active season's points range.
 
 **Registered vs Temp player** — `status`. Temp = a guest/fill-in not on the official roster;
 still fully scored. The Season Log shows registered players only; the Players tab shows both.
+
+**Roles** — `admin` (runs the club: all writes) · `player` (a registered member whose login is
+linked to their `players` row: edits only their own profile's self-service fields) · `viewer`
+(signed in, no linked player: read-only) · `guest` (not signed in: read-only). "Linked" =
+`players.auth_user_id` matches the auth user, set by the TD adding the member's email then the
+member signing up / logging in (`link_my_player`).
 
 **Space** — the multi-tenant unit on the Darts Nexus platform. CJDA is one space
 (`SPACE_ID`). Every CJDA row is scoped by `space_id`.

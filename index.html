@@ -143,7 +143,9 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // ═══════════════════════════════════════════════
 const state = {
   user: null,
-  role: 'guest', // guest | viewer | admin
+  role: 'guest', // guest | viewer | player | admin
+  myPlayerId: null,      // players.id linked to the signed-in auth user (player role)
+  accountMenuOpen: false, // top-right account dropdown
   tab: 'home',
   lightMode: false,
   loading: false,
@@ -191,6 +193,9 @@ const state = {
 // UTILITIES
 // ═══════════════════════════════════════════════
 function isAdmin() { return state.role === 'admin'; }
+function isPlayer() { return state.role === 'player'; }
+// Who may edit a given player's profile: admins edit anyone; a player edits only their own.
+function canEditProfile(playerId) { return isAdmin() || (isPlayer() && !!playerId && playerId === state.myPlayerId); }
 
 function showToast(msg, type = 'success') {
   const t = document.createElement('div');
@@ -214,30 +219,71 @@ function ordinal(n) {
 // ═══════════════════════════════════════════════
 // AUTH
 // ═══════════════════════════════════════════════
+// Resolve role + linked player after auth. Admin = DB registry or the ADMIN_EMAILS list
+// (mirrors the is_app_admin() SQL function). Non-admins are auto-linked to a player row
+// by matching email; unlinked logins are plain viewers.
+async function resolveIdentity() {
+  state.myPlayerId = null;
+  if (!state.user) { state.role = 'guest'; return; }
+  let admin = isAdminEmail(state.user.email);
+  if (!admin) {
+    try { const { data } = await sb.rpc('is_app_admin'); admin = data === true; } catch (e) { /* ignore */ }
+  }
+  // Resolve a linked player row for everyone — admins can be players too.
+  try {
+    let { data: linked } = await sb.from('players').select('id').eq('auth_user_id', state.user.id).maybeSingle();
+    if (!linked) {
+      const { data: fresh, error } = await sb.rpc('link_my_player');
+      if (!error && fresh) linked = Array.isArray(fresh) ? fresh[0] : fresh;
+    }
+    if (linked && linked.id) state.myPlayerId = linked.id;
+  } catch (e) { /* no match → not linked */ }
+  state.role = admin ? 'admin' : (state.myPlayerId ? 'player' : 'viewer');
+}
+
 async function signIn() {
   state.loading = true; render();
-  const { data, error } = await sb.auth.signInWithPassword({ email: state.authEmail, password: state.authPassword });
-  state.loading = false;
-  if (error) { showToast(error.message, 'error'); render(); return; }
+  const { data, error } = await sb.auth.signInWithPassword({ email: (state.authEmail || '').trim(), password: state.authPassword });
+  if (error) { state.loading = false; showToast(error.message, 'error'); render(); return; }
   state.user = data.user;
-  state.role = isAdminEmail(data.user.email) ? 'admin' : 'viewer';
+  await resolveIdentity();
+  state.loading = false;
   await loadAllData();
   render();
 }
 
+// Invite-only: the email must already sit on an unclaimed player profile (added by the TD).
 async function signUp() {
+  const email = (state.authEmail || '').trim().toLowerCase();
+  if (!email || !state.authPassword) { showToast('Enter your email and a password (min 6 characters)', 'error'); return; }
   state.loading = true; render();
-  const { data, error } = await sb.auth.signUp({ email: state.authEmail, password: state.authPassword });
+  const { data: match } = await sb.from('players')
+    .select('id, first_name').ilike('email', email).is('auth_user_id', null).maybeSingle();
+  if (!match) {
+    state.loading = false;
+    showToast('That email is not on the register yet — ask the Tournament Director to add it to your player profile.', 'error');
+    render(); return;
+  }
+  const { error } = await sb.auth.signUp({ email: (state.authEmail || '').trim(), password: state.authPassword });
   state.loading = false;
   if (error) { showToast(error.message, 'error'); render(); return; }
-  showToast('Account created! Please sign in.');
+  showToast('Welcome ' + match.first_name + '! You can sign in now.');
   state.authMode = 'signin';
   render();
+}
+
+async function requestPasswordReset() {
+  const email = (state.authEmail || '').trim();
+  if (!email) { showToast('Type your email first, then tap "Forgot password".', 'error'); return; }
+  const { error } = await sb.auth.resetPasswordForEmail(email);
+  if (error) { showToast(error.message, 'error'); return; }
+  showToast('If that email has an account, a reset link is on its way.');
 }
 
 async function signOut() {
   await sb.auth.signOut();
   state.user = null; state.role = 'guest';
+  state.myPlayerId = null; state.accountMenuOpen = false;
   state.players = []; state.nights = []; state.results = []; state.accolades = [];
   render();
 }
@@ -2342,7 +2388,7 @@ function renderAuth() {
       <div class="card" style="width:100%;max-width:360px;padding:24px">
         <div class="tab-group" style="margin-bottom:20px">
           <div class="tab-btn ${state.authMode==='signin'?'active':''}" onclick="state.authMode='signin';render()">Sign In</div>
-          <div class="tab-btn ${state.authMode==='signup'?'active':''}" onclick="state.authMode='signup';render()">Sign Up</div>
+          <div class="tab-btn ${state.authMode==='signup'?'active':''}" onclick="state.authMode='signup';render()">First-time setup</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:14px">
           <div>
@@ -2350,12 +2396,15 @@ function renderAuth() {
             <input class="form-input" type="email" value="${state.authEmail}" oninput="state.authEmail=this.value" placeholder="your@email.com">
           </div>
           <div>
-            <label class="form-label">Password</label>
+            <label class="form-label">${state.authMode==='signup'?'Choose a password':'Password'}</label>
             <input class="form-input" type="password" value="${state.authPassword}" oninput="state.authPassword=this.value" placeholder="••••••••" onkeydown="if(event.key==='Enter')state.authMode==='signin'?signIn():signUp()">
           </div>
           <button class="btn btn-primary" style="width:100%;justify-content:center;padding:10px" onclick="${state.authMode==='signin'?'signIn()':'signUp()'}">
-            ${state.loading ? '<span class="spinner"></span>' : (state.authMode==='signin' ? 'Sign In' : 'Create Account')}
+            ${state.loading ? '<span class="spinner"></span>' : (state.authMode==='signin' ? 'Sign In' : 'Create My Login')}
           </button>
+          ${state.authMode==='signin'
+            ? `<div style="text-align:center"><a href="javascript:void(0)" onclick="requestPasswordReset()" style="font-size:0.72rem;color:var(--text-muted)">Forgot password?</a></div>`
+            : `<div style="font-size:0.7rem;color:var(--text-muted);line-height:1.5;text-align:center">Your email must already be on your player profile. If it isn't, ask the Tournament Director to add it, then come back here.</div>`}
         </div>
       </div>
       <div style="margin-top:16px;font-size:0.72rem;color:var(--text-muted);text-align:center">The Darts Nexus Platform</div>
@@ -2365,6 +2414,43 @@ function renderAuth() {
 // ═══════════════════════════════════════════════
 // RENDER — HEADER
 // ═══════════════════════════════════════════════
+function toggleAccountMenu() { state.accountMenuOpen = !state.accountMenuOpen; render(); }
+
+function openMyProfile() {
+  state.accountMenuOpen = false;
+  if (!state.myPlayerId) { showToast('Your account is not linked to a player profile yet.', 'error'); render(); return; }
+  state.tab = 'players';
+  openPlayerProfile(state.myPlayerId);
+  startProfileEdit();
+}
+
+// Top-right account avatar + dropdown (theme, edit my profile, refresh, sign out).
+function renderAccountMenu() {
+  const me = state.myPlayerId ? state.players.find(p => p.id === state.myPlayerId) : null;
+  const avatar = me
+    ? miniAvatar(me, 30)
+    : `<span style="width:30px;height:30px;border-radius:50%;display:inline-grid;place-items:center;background:var(--green-dark);border:1px solid var(--border);color:var(--text-muted);font-size:0.8rem;font-family:'Bebas Neue',sans-serif">${((state.user && state.user.email) || '?')[0].toUpperCase()}</span>`;
+  const item = (label, onclick) =>
+    `<button onclick="${onclick}" style="display:block;width:100%;text-align:left;padding:8px 14px;background:transparent;border:none;color:var(--text);font-family:'Rajdhani',sans-serif;font-size:0.8rem;font-weight:600;cursor:pointer" onmouseover="this.style.background='var(--green-dark)'" onmouseout="this.style.background='transparent'">${label}</button>`;
+  const canEditMine = state.myPlayerId && canEditProfile(state.myPlayerId);
+  return `
+    <div style="position:relative">
+      <button onclick="toggleAccountMenu()" title="Account" style="padding:2px;background:transparent;border:none;cursor:pointer;display:flex;border-radius:50%">${avatar}</button>
+      ${state.accountMenuOpen ? `
+        <div onclick="state.accountMenuOpen=false;render()" style="position:fixed;inset:0;z-index:60"></div>
+        <div style="position:absolute;right:0;top:calc(100% + 6px);z-index:61;min-width:190px;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.4);overflow:hidden">
+          <div style="padding:8px 14px;border-bottom:1px solid var(--border)">
+            <div style="font-size:0.74rem;color:var(--text);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(state.user && state.user.email) || ''}</div>
+            <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.06em">${state.role.toUpperCase()}</div>
+          </div>
+          ${canEditMine ? item('Edit my profile', 'openMyProfile()') : ''}
+          ${item(state.lightMode ? 'Dark mode' : 'Light mode', "state.accountMenuOpen=false;state.lightMode=!state.lightMode;document.body.classList.toggle('light');render()")}
+          ${item('Refresh data', 'state.accountMenuOpen=false;refreshData()')}
+          <div style="border-top:1px solid var(--border)">${item('Sign out', 'signOut()')}</div>
+        </div>` : ''}
+    </div>`;
+}
+
 function renderHeader() {
   const tabs = [
     { id: 'home', label: 'Home' },
@@ -2385,16 +2471,10 @@ function renderHeader() {
             <div style="font-size:0.72rem;color:var(--text-muted)">Howzit, <span style="color:var(--green-accent)">${state.user?.email || ''}</span> <span style="font-weight:700;color:var(--${isAdmin()?'red':'text-muted'})">[${state.role.toUpperCase()}]</span></div>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.7rem" onclick="state.lightMode=!state.lightMode;document.body.classList.toggle('light');render()">
-            ${state.lightMode ? '🌙' : '☀️'}
-          </button>
-          <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.7rem" onclick="refreshData()">↻</button>
-          <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.7rem" onclick="signOut()">Sign Out</button>
-        </div>
+        ${renderAccountMenu()}
       </div>
       <div class="nav-tabs">
-        ${tabs.map(t => `<div class="nav-tab ${state.tab===t.id?'active':''}" onclick="state.tab='${t.id}';state.profilePlayerId=null;state.profileEdit=false;render()">${t.label}</div>`).join('')}
+        ${tabs.map(t => `<div class="nav-tab ${state.tab===t.id?'active':''}" onclick="state.tab='${t.id}';state.profilePlayerId=null;state.profileEdit=false;state.accountMenuOpen=false;render()">${t.label}</div>`).join('')}
       </div>
     </div>`;
 }
@@ -2789,7 +2869,7 @@ function closePlayerProfile() {
 }
 function startProfileEdit() {
   const p = state.players.find(x => x.id === state.profilePlayerId);
-  if (!p || !isAdmin()) return;
+  if (!p || !canEditProfile(p.id)) return;
   state.profileDraft = { ...p };
   state.profileEdit = true;
   render();
@@ -2803,29 +2883,45 @@ function updateProfileField(field, value) {
   if (state.profileDraft) state.profileDraft[field] = value;
 }
 async function saveProfileEdit() {
-  if (!state.profileDraft || !isAdmin()) return;
-  const d = state.profileDraft;
-  if (!d.first_name || !d.last_name) { showToast('First and last name are required', 'error'); return; }
-  // Only write the fields this form owns — never photo_url / base_* / id_number / timestamps,
-  // which would otherwise be clobbered by a stale draft (e.g. a photo uploaded mid-edit).
-  const weight = (d.dart_weight_g === '' || d.dart_weight_g == null) ? null : (parseInt(d.dart_weight_g) || null);
-  const patch = {
-    first_name: d.first_name, last_name: d.last_name,
-    nickname: d.nickname || null,
-    category: d.category, status: d.status,
-    dsa_number: d.dsa_number || null,
-    phone: d.phone || null, email: d.email || null,
-    dart_brand: d.dart_brand || null, dart_model: d.dart_model || null,
-    dart_weight_g: weight, dart_notes: d.dart_notes || null,
-    updated_at: new Date().toISOString(),
-  };
+  if (!state.profileDraft) return;
   const id = state.profilePlayerId;
-  state.profileEdit = false;
-  state.profileDraft = null;
+  if (!canEditProfile(id)) return;
+  const d = state.profileDraft;
+  const weight = (d.dart_weight_g === '' || d.dart_weight_g == null) ? null : (parseInt(d.dart_weight_g) || null);
+
+  if (isAdmin()) {
+    if (!d.first_name || !d.last_name) { showToast('First and last name are required', 'error'); return; }
+    // Whitelist — never photo_url / base_* / id_number / timestamps (stale-draft clobber).
+    const patch = {
+      first_name: d.first_name, last_name: d.last_name,
+      nickname: d.nickname || null,
+      category: d.category, status: d.status,
+      dsa_number: d.dsa_number || null,
+      phone: d.phone || null, email: d.email || null,
+      dart_brand: d.dart_brand || null, dart_model: d.dart_model || null,
+      dart_weight_g: weight, dart_notes: d.dart_notes || null,
+      updated_at: new Date().toISOString(),
+    };
+    state.profileEdit = false; state.profileDraft = null;
+    state.loading = true; render();
+    const { error } = await sb.from('players').update(patch).eq('id', id);
+    if (error) { showToast(error.message, 'error'); state.loading = false; render(); return; }
+    showToast('Player updated');
+    await loadAllData();
+    return;
+  }
+
+  // Player editing their own profile — safe fields only, enforced server-side by save_my_profile().
+  const patch = {
+    nickname: d.nickname || '', phone: d.phone || '', email: d.email || '',
+    dart_brand: d.dart_brand || '', dart_model: d.dart_model || '',
+    dart_weight_g: weight == null ? '' : String(weight), dart_notes: d.dart_notes || '',
+  };
+  state.profileEdit = false; state.profileDraft = null;
   state.loading = true; render();
-  const { error } = await sb.from('players').update(patch).eq('id', id);
-  if (error) { showToast(error.message, 'error'); state.loading = false; render(); return; }
-  showToast('Player updated');
+  const { error } = await sb.rpc('save_my_profile', { patch });
+  if (error) { showToast(error.message || 'Could not save', 'error'); state.loading = false; render(); return; }
+  showToast('Profile updated');
   await loadAllData();
 }
 
@@ -2848,8 +2944,14 @@ function downscaleImage(file, maxDim, quality) {
   });
 }
 
+// Persist a player's photo_url: admins write directly; a player writes their own via set_my_photo().
+async function setPhotoUrl(playerId, url) {
+  if (isAdmin()) return sb.from('players').update({ photo_url: url }).eq('id', playerId);
+  return sb.rpc('set_my_photo', { url: url || '' });
+}
+
 async function uploadPlayerPhoto(playerId, input) {
-  if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+  if (!canEditProfile(playerId)) { showToast('Not allowed', 'error'); return; }
   const file = input && input.files && input.files[0];
   if (!file) return;
   state.loading = true; render();
@@ -2860,7 +2962,7 @@ async function uploadPlayerPhoto(playerId, input) {
     if (upErr) throw upErr;
     const { data: pub } = sb.storage.from('player-photos').getPublicUrl(path);
     const url = pub.publicUrl + '?v=' + Date.now();
-    const { error } = await sb.from('players').update({ photo_url: url }).eq('id', playerId);
+    const { error } = await setPhotoUrl(playerId, url);
     if (error) throw error;
     showToast('Photo updated');
     await loadAllData();
@@ -2873,12 +2975,13 @@ async function uploadPlayerPhoto(playerId, input) {
 }
 
 async function removePlayerPhoto(playerId) {
-  if (!isAdmin()) return;
-  if (!confirm('Remove this player\'s photo?')) return;
+  if (!canEditProfile(playerId)) return;
+  if (!confirm('Remove this photo?')) return;
   state.loading = true; render();
   try {
     await sb.storage.from('player-photos').remove([playerId + '.jpg']);
-    await sb.from('players').update({ photo_url: null }).eq('id', playerId);
+    const { error } = await setPhotoUrl(playerId, null);
+    if (error) throw error;
     showToast('Photo removed');
     await loadAllData();
     return;
@@ -2981,7 +3084,8 @@ function renderPlayerProfile() {
   const p = state.players.find(x => x.id === state.profilePlayerId);
   if (!p) { closePlayerProfile(); return ''; }
   const admin = isAdmin();
-  const editing = admin && state.profileEdit;
+  const canEdit = canEditProfile(p.id);
+  const editing = canEdit && state.profileEdit;
   const d = editing ? (state.profileDraft || p) : p;
 
   const stats = calcPlayerSeasonStats(p.id);
@@ -3003,7 +3107,9 @@ function renderPlayerProfile() {
 
   const field = (label, key, opts = {}) => {
     const val = d[key] == null ? '' : d[key];
-    if (!editing) {
+    // adminField fields (name, DSA) stay read-only for a player editing their own profile.
+    const asInput = editing && !(opts.adminField && !admin);
+    if (!asInput) {
       return `<div><div style="font-size:0.62rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted)">${label}</div>
         <div style="font-size:0.92rem;margin-top:2px;${opts.mono ? "font-family:'Share Tech Mono',monospace;font-size:0.86rem;" : ''}${val ? '' : 'color:var(--text-muted);font-style:italic'}">${val || '—'}</div></div>`;
     }
@@ -3021,7 +3127,7 @@ function renderPlayerProfile() {
   // ---- hero photo ----
   const photo = `<span style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--text-muted);letter-spacing:0.02em">${playerInitials(p)}</span>`
     + (p.photo_url ? `<img src="${p.photo_url}" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">` : '');
-  const photoControls = admin ? `
+  const photoControls = canEdit ? `
     <label style="position:absolute;left:0;right:0;bottom:0;height:24px;display:grid;place-items:center;background:rgba(0,0,0,0.6);color:#fff;font-size:0.62rem;letter-spacing:0.04em;cursor:pointer">
       ${p.photo_url ? 'CHANGE' : '📷 UPLOAD'}
       <input type="file" accept="image/*" style="display:none" onchange="uploadPlayerPhoto('${p.id}',this)">
@@ -3099,18 +3205,18 @@ function renderPlayerProfile() {
           ${[['Brand', p.dart_brand], ['Model', p.dart_model], ['Weight', p.dart_weight_g ? p.dart_weight_g + ' g' : '']].filter(r => r[1]).map(r => `<div style="display:flex;gap:10px"><span style="font-size:0.62rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);width:66px;flex-shrink:0">${r[0]}</span><span style="font-size:0.9rem">${r[1]}</span></div>`).join('')}
           ${p.dart_notes ? `<div style="margin-top:2px;padding:9px 11px;border:1px dashed var(--border);border-radius:7px;background:var(--bg);font-size:0.82rem;color:var(--text-muted)">${p.dart_notes}</div>` : ''}
         </div>`
-      : `<div style="font-size:0.8rem;color:var(--text-muted);font-style:italic">No darts setup recorded.${admin ? ' Use Edit to add it.' : ''}</div>`;
+      : `<div style="font-size:0.8rem;color:var(--text-muted);font-style:italic">No darts setup recorded.${canEdit ? ' Use Edit to add it.' : ''}</div>`;
 
   const detailsBody = `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 18px">
       ${field('Nick Name', 'nickname')}
-      ${field('DSA Number', 'dsa_number', { mono: true })}
-      ${field('First Name', 'first_name')}
-      ${field('Surname', 'last_name')}
+      ${field('DSA Number', 'dsa_number', { mono: true, adminField: true })}
+      ${field('First Name', 'first_name', { adminField: true })}
+      ${field('Surname', 'last_name', { adminField: true })}
       ${field('Cellphone Number', 'phone', { mono: true })}
       ${field('Email', 'email')}
-      ${editing ? field('Category', 'category', { select: [['men', 'Men'], ['ladies', 'Ladies'], ['junior_boy', 'Junior (Boy)'], ['junior_girl', 'Junior (Girl)']].map(([v, t]) => ({ v, t })) }) : ''}
-      ${editing ? field('Status', 'status', { select: [{ v: 'registered', t: 'Registered' }, { v: 'temp', t: 'Temporary' }] }) : ''}
+      ${admin && editing ? field('Category', 'category', { select: [['men', 'Men'], ['ladies', 'Ladies'], ['junior_boy', 'Junior (Boy)'], ['junior_girl', 'Junior (Girl)']].map(([v, t]) => ({ v, t })) }) : ''}
+      ${admin && editing ? field('Status', 'status', { select: [{ v: 'registered', t: 'Registered' }, { v: 'temp', t: 'Temporary' }] }) : ''}
     </div>`;
 
   return `
@@ -3127,7 +3233,7 @@ function renderPlayerProfile() {
         </div>
         <div style="display:flex;flex-direction:column;gap:7px;align-items:flex-end">
           <button class="btn btn-ghost" style="font-size:0.74rem;padding:5px 11px" onclick="closePlayerProfile()">← Players</button>
-          ${admin && !editing ? `<button class="btn btn-primary" style="font-size:0.74rem;padding:5px 11px" onclick="startProfileEdit()">Edit</button>` : ''}
+          ${canEdit && !editing ? `<button class="btn btn-primary" style="font-size:0.74rem;padding:5px 11px" onclick="startProfileEdit()">Edit</button>` : ''}
           ${editing ? `<div style="display:flex;gap:6px">
               <button class="btn btn-ghost" style="font-size:0.74rem;padding:5px 11px" onclick="cancelProfileEdit()">Cancel</button>
               <button class="btn btn-primary" style="font-size:0.74rem;padding:5px 11px" onclick="saveProfileEdit()">Save</button>
@@ -4269,7 +4375,7 @@ function restoreAssistantUI() {
   const { data: { session } } = await sb.auth.getSession();
   if (session?.user) {
     state.user = session.user;
-    state.role = isAdminEmail(session.user.email) ? 'admin' : 'viewer';
+    await resolveIdentity();
     await loadAllData();
   }
   render();
