@@ -43,6 +43,7 @@ sections of the inline script. Approximate map (line numbers drift — search by
 
 | Section | ~Lines | Responsibility |
 |---|---|---|
+| `<style>` (in `<head>`) | 10–150 | all CSS. A single `@media (max-width: 640px)` block holds the **phone-portrait** layer — reaches the inline-styled DOM via class hooks (`.app-title/.app-greeting/.app-logo`, `.dash-scroll`, `.log-tbl` frozen first 3 cols, `.players-tbl` + `data-col` hides). Tablet/desktop must never be affected — verify at 380px *and* 1200px. |
 | Config + Supabase init | 122–140 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPACE_ID`, `ADMIN_EMAILS`, `isAdminEmail()`, `sb` client |
 | App state | 141–190 | the `state` object (see §14.2) |
 | Utilities | 190–215 | `isAdmin`, `showToast`, `formatDate`, `ordinal` |
