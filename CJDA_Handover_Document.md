@@ -139,10 +139,17 @@ All CJDA tables carry `space_id` (always `SPACE_ID`) + `created_at`. RLS: see §
 The `base_*` columns are pre-app career totals folded into the calculated figures.
 
 **`app_admins`** — `(user_id, space_id)` PK. Per-space admins. Read policy: authenticated.
-**No write policy** — changed only via SQL / service role. CJDA rows: Alexander (superadmin),
-Wynie (TD). The platform super-user (`dartsnexus@outlook.com`) is *not* a row here — it's
+**No write policy** — changed only via SQL / service role. CJDA rows:
+`alexander.kloppers93@gmail.com` (kept as a backup admin), `wynandcarelse123@gmail.com`
+(Wynie, TD). The platform super-user (`dartsnexus@outlook.com`) is *not* a row here — it's
 handled by `is_platform_superadmin()` and is admin of every space. `is_space_admin()` also
-honours a 2-address CJDA email allowlist (Alexander, Wynie) so a fresh admin works pre-seed.
+honours a 2-address CJDA email allowlist (same two) so a fresh admin works pre-seed.
+
+**Linked accounts** (2026-09-03): **Wynie's** login is linked to his `players` row (`dd8218c7-…`,
+email `wynandcarelse123@gmail.com`) — he's admin *and* a player. **Alexander Kloppers'** player
+row (`6c33ccc7-…`) carries `Alexander.Kloppers@Outlook.com` but is deliberately **unlinked** —
+the user's plain-player test identity (First-time setup with that address → `role: player`).
+`dartsnexus@outlook.com` has no player row.
 
 **`seasons`** — `name`*, `start_date`*, `end_date`, `is_active`, plus **two independent date
 ranges**: `season_points_start/end` (prize-giving) and `selection_points_start/end`
