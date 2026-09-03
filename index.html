@@ -2476,7 +2476,7 @@ function renderHome() {
     tabPlayers.forEach((p, i) => {
       standingRows += '<tr style="' + (i%2===0?'':'background:rgba(45,106,45,0.05)') + '">'
         + '<td style="padding:3px 6px;font-size:0.72rem;color:var(--text-muted)">' + ordinal(i+1) + '</td>'
-        + '<td style="padding:3px 6px;font-size:0.78rem;font-weight:600">' + p.first_name + ' ' + p.last_name + '</td>'
+        + '<td style="padding:3px 6px;font-size:0.78rem;font-weight:600"><span style="display:inline-flex;align-items:center;gap:6px">' + miniAvatar(p, 20) + (p.nickname || p.first_name) + '</span></td>'
         + '<td style="padding:3px 6px;font-size:0.82rem;font-weight:700;color:var(--red);text-align:right">' + (p.seasonPoints||0) + '</td>'
         + '<td style="padding:3px 6px;font-size:0.72rem;color:var(--text-muted);text-align:right">' + (p.selectionPoints||0) + '</td>'
         + '</tr>';
@@ -2806,12 +2806,27 @@ async function saveProfileEdit() {
   if (!state.profileDraft || !isAdmin()) return;
   const d = state.profileDraft;
   if (!d.first_name || !d.last_name) { showToast('First and last name are required', 'error'); return; }
-  if (d.dart_weight_g === '' || d.dart_weight_g == null) d.dart_weight_g = null;
-  else d.dart_weight_g = parseInt(d.dart_weight_g) || null;
-  const draft = { ...d };
+  // Only write the fields this form owns — never photo_url / base_* / id_number / timestamps,
+  // which would otherwise be clobbered by a stale draft (e.g. a photo uploaded mid-edit).
+  const weight = (d.dart_weight_g === '' || d.dart_weight_g == null) ? null : (parseInt(d.dart_weight_g) || null);
+  const patch = {
+    first_name: d.first_name, last_name: d.last_name,
+    nickname: d.nickname || null,
+    category: d.category, status: d.status,
+    dsa_number: d.dsa_number || null,
+    phone: d.phone || null, email: d.email || null,
+    dart_brand: d.dart_brand || null, dart_model: d.dart_model || null,
+    dart_weight_g: weight, dart_notes: d.dart_notes || null,
+    updated_at: new Date().toISOString(),
+  };
+  const id = state.profilePlayerId;
   state.profileEdit = false;
   state.profileDraft = null;
-  await savePlayer(draft);   // savePlayer → loadAllData → render
+  state.loading = true; render();
+  const { error } = await sb.from('players').update(patch).eq('id', id);
+  if (error) { showToast(error.message, 'error'); state.loading = false; render(); return; }
+  showToast('Player updated');
+  await loadAllData();
 }
 
 function downscaleImage(file, maxDim, quality) {
@@ -2955,6 +2970,13 @@ function playerInitials(p) {
   return ((p.first_name || '')[0] || '') + ((p.last_name || '')[0] || '') || '?';
 }
 
+// Small round player avatar: photo if set, else an initials disc. The <img> sits over the
+// initials and removes itself on load error, so a dead URL degrades to initials.
+function miniAvatar(p, size) {
+  const s = size || 20;
+  return `<span style="position:relative;display:inline-grid;place-items:center;width:${s}px;height:${s}px;border-radius:50%;overflow:hidden;flex-shrink:0;background:var(--green-dark);border:1px solid var(--border);color:var(--text-muted);font-size:${Math.round(s * 0.44)}px;font-family:'Bebas Neue',sans-serif;line-height:1">${playerInitials(p)}${p.photo_url ? `<img src="${p.photo_url}" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">` : ''}</span>`;
+}
+
 function renderPlayerProfile() {
   const p = state.players.find(x => x.id === state.profilePlayerId);
   if (!p) { closePlayerProfile(); return ''; }
@@ -2997,9 +3019,8 @@ function renderPlayerProfile() {
   };
 
   // ---- hero photo ----
-  const photo = p.photo_url
-    ? `<img src="${p.photo_url}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">`
-    : `<span style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--text-muted);letter-spacing:0.02em">${playerInitials(p)}</span>`;
+  const photo = `<span style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--text-muted);letter-spacing:0.02em">${playerInitials(p)}</span>`
+    + (p.photo_url ? `<img src="${p.photo_url}" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">` : '');
   const photoControls = admin ? `
     <label style="position:absolute;left:0;right:0;bottom:0;height:24px;display:grid;place-items:center;background:rgba(0,0,0,0.6);color:#fff;font-size:0.62rem;letter-spacing:0.04em;cursor:pointer">
       ${p.photo_url ? 'CHANGE' : '📷 UPLOAD'}
