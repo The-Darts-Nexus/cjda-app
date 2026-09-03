@@ -2789,12 +2789,15 @@ function renderAccoladeGuide() {
 // RENDER — NIGHT SETUP (Placeholder V1)
 // ═══════════════════════════════════════════════
 function renderNightSetup() {
-  // If there's an active night being entered, show block entry
-  if (state.activeNight) return renderBlockEntry();
+  // If there's an active night being entered, show its entry sheet
+  if (state.activeNight) return isTeamComp(state.activeNight) ? renderDoublesComp() : renderBlockEntry();
 
-  const submittedNights = state.nights.filter(n => n.status === 'submitted' || n.status === 'locked')
+  // Competition nights (Selected Doubles, Drawn Doubles, Mixed Triples, CoC, Home Alone Cup, …)
+  // live on the Competitions tab — Night Setup is league nights only (Wednesday, DIDO).
+  const isLeagueNight = n => !isCompNight(n.night_type_id);
+  const submittedNights = state.nights.filter(n => isLeagueNight(n) && (n.status === 'submitted' || n.status === 'locked'))
     .sort((a, b) => new Date(b.date) - new Date(a.date));
-  const draftNights = state.nights.filter(n => n.status === 'draft')
+  const draftNights = state.nights.filter(n => isLeagueNight(n) && n.status === 'draft')
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   return `
