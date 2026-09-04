@@ -480,13 +480,43 @@ function getCompStandings(nightId) {
 }
 
 // Playoff champion of a competition night, if one was played (Final = round 3 winner).
-function compChampionId(nightId) {
-  const fin = (state.nightPlayoffs || []).find(m => m.night_id === nightId && m.round === 3 && m.winner_id);
-  return fin ? fin.winner_id : null;
+// The final match of a night's playoff bracket = highest round, match 1 (any bracket size).
+function playoffFinalMatch(nightId) {
+  const pm = (state.nightPlayoffs || []).filter(m => m.night_id === nightId);
+  if (!pm.length) return null;
+  const maxR = Math.max(...pm.map(m => m.round || 0));
+  return pm.find(m => m.round === maxR && (m.match_number || 1) === 1) || null;
+}
+function compChampionId(nightId) {          // singles-comp / DIDO playoff champion (a player)
+  const fin = playoffFinalMatch(nightId);
+  return fin ? (fin.winner_id || null) : null;
+}
+function compChampionTeamId(nightId) {      // team-comp playoff champion (a comp_teams row)
+  const fin = playoffFinalMatch(nightId);
+  return fin ? (fin.winner_team_id || null) : null;
 }
 function playerName(id) {
   const p = id && state.players.find(x => x.id === id);
   return p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : null;
+}
+
+// One combined ranking for any competition — powers the "Conclude by ranking" option
+// and seeds the generic playoff generator.
+function compRoundRobinStandings(nightId) {
+  const night = state.nights.find(n => n.id === nightId);
+  if (night && isTeamComp(night)) {
+    return getDoublesStandings(nightId).map(r => ({
+      kind: 'team', teamId: r.teamId, seed: r.seed, name: r.name,
+      total: r.total, gp: r.gp, lw: r.lw, gw: r.gw,
+    }));
+  }
+  // singles: flatten every block/session into one per-player total
+  const agg = {};
+  getCompStandings(nightId).forEach(grp => grp.players.forEach(p => {
+    const a = agg[p.pid] || (agg[p.pid] = { kind: 'player', pid: p.pid, name: p.name, total: 0, gp: 0, lw: 0, gw: 0 });
+    a.total += p.total; a.gp += p.gp; a.lw += p.legs; a.gw += p.gw;
+  }));
+  return Object.values(agg).sort((a, b) => b.total - a.total || b.gw - a.gw || b.lw - a.lw);
 }
 
 
@@ -729,7 +759,7 @@ async function viewNight(nightId) {
         else if (a.accolade_type === '15_dart') { accoladesArr[idx].l15++; accoladesArr[idx].l15_value = String(a.value || 14); }
         else if (a.accolade_type === '9_darter') accoladesArr[idx]['9dart']++;
       });
-      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id };
+      return { label: block.block_label, size, slots, legs, accolades: accoladesArr, bonus: block.bonus || 0, id: block.id, session: block.session || 1 };
     });
     await loadNightPlayoffs(nightId);
     await loadCompTables(nightId);
@@ -865,7 +895,8 @@ async function openNightEntry(nightId) {
           legs,
           accolades: accoladesArr,
           bonus: block.bonus || 0,
-          id: block.id
+          id: block.id,
+          session: block.session || 1
         };
       });
       state.activeBlockIdx = 0;
@@ -929,6 +960,7 @@ function addBlock() {
     label: `Block ${state.nightBlocks.length + 1}`,
     size,
     format: fmt,
+    session: state.compSession || 1,
     slots: Array(size).fill(null).map(() => Array(pps).fill(null)),
     legs: Array.from({length: size}, () => Array(size).fill(0)),
     accolades: Array.from({length: size}, () => ({ records: [] })),
@@ -1037,10 +1069,29 @@ async function generateBlocksFromRegister() {
 }
 
 function removeLastBlock() {
-  if (state.nightBlocks.length <= 1) return;
-  state.nightBlocks.pop();
+  const comp = state.activeNight && isCompNight(state.activeNight.night_type_id);
+  if (comp) {
+    // remove the last block of the active session; keep at least one per session
+    const idxs = state.nightBlocks.map((bl, i) => ({ bl, i })).filter(x => (x.bl.session || 1) === state.compSession);
+    if (idxs.length <= 1) { showToast('A session needs at least one block', 'error'); return; }
+    state.nightBlocks.splice(idxs[idxs.length - 1].i, 1);
+  } else {
+    if (state.nightBlocks.length <= 1) return;
+    state.nightBlocks.pop();
+  }
   state.activeBlockIdx = Math.min(state.activeBlockIdx, state.nightBlocks.length - 1);
   render();
+}
+
+async function addSinglesSession() {
+  if (!state.activeNight || !isAdmin()) return;
+  const next = (state.activeNight.comp_sessions || 1) + 1;
+  await sb.from('nights').update({ comp_sessions: next }).eq('id', state.activeNight.id);
+  state.activeNight.comp_sessions = next;
+  const nn = state.nights.find(n => n.id === state.activeNight.id);
+  if (nn) nn.comp_sessions = next;
+  state.compSession = next;
+  addBlock();   // seed the new session with one block so the sheet always has content
 }
 
 function setBlockSize(blockIdx, size) {
@@ -1186,6 +1237,15 @@ function nightMatchLegs(nightTypeId) {
   return /dido/i.test((nt && nt.name) || '') ? 1 : 3;
 }
 
+// Max legs an input accepts. Only the plain Wednesday league night is fixed to best-of-3;
+// every competition (incl. DIDO) takes any leg count — a comp match is just "whoever won more".
+function legCap(nightTypeId) {
+  const id = nightTypeId || (state.activeNight && state.activeNight.night_type_id);
+  const nt = state.nightTypes.find(t => t.id === id);
+  if (nt && nt.counts_match_points && !/dido/i.test(nt.name || '')) return 3;
+  return 99;
+}
+
 // Block leg-cell conditional formatting — colour by legs value:
 // 0 = red · 1 = yellow · 2 = green · 3+ = purple
 function legColor(val) {
@@ -1198,7 +1258,7 @@ function legColor(val) {
 }
 
 function updateLeg(blockIdx, row, col, val) {
-  const cap = nightMatchLegs();
+  const cap = legCap();
   const v = Math.max(0, Math.min(cap, parseInt(val) || 0));
   state.nightBlocks[blockIdx].legs[row][col] = v;
   render();
@@ -1362,25 +1422,40 @@ function didoSeeds(q) {
   return seeds;
 }
 
-function playoffMatchComplete(a, b, bestOf) {
+// Flexible: a playoff match is done once one side has more legs (admin enters the final score).
+// best_of is just a display label / the generator's default now.
+function playoffMatchComplete(a, b) {
   a = parseInt(a) || 0; b = parseInt(b) || 0;
-  if (bestOf === 1) return a + b === 1;
-  return Math.max(a, b) >= 2 && a !== b;
+  return (a + b) > 0 && a !== b;
 }
 
-// Pure: recompute winners, advance QF winners into the SF and SF winners into the Final.
+// Pure: recompute each match's winner and advance it into the next round. Any bracket size,
+// player-vs-player OR team-vs-team (a bracket is entirely one kind — set at generation).
 function recomputeBracket(matches) {
+  if (!matches.length) return matches;
+  const isTeam = matches.some(m => m.team_a_id || m.team_b_id);
+  const A = isTeam ? 'team_a_id' : 'player_a_id';
+  const B = isTeam ? 'team_b_id' : 'player_b_id';
+  const W = isTeam ? 'winner_team_id' : 'winner_id';
   const get = (r, m) => matches.find(x => x.round === r && x.match_number === m);
   const winnerOf = (mt) => {
-    if (!mt || !mt.player_a_id || !mt.player_b_id) return null;
-    if (!playoffMatchComplete(mt.a_legs, mt.b_legs, mt.best_of)) return null;
-    return (mt.a_legs || 0) > (mt.b_legs || 0) ? mt.player_a_id : mt.player_b_id;
+    if (!mt || !mt[A] || !mt[B]) return null;
+    if (!playoffMatchComplete(mt.a_legs, mt.b_legs)) return null;
+    return (mt.a_legs || 0) > (mt.b_legs || 0) ? mt[A] : mt[B];
   };
-  for (let m = 1; m <= 4; m++) { const mt = get(1, m); if (mt) mt.winner_id = winnerOf(mt); }
-  const sf1 = get(2, 1), sf2 = get(2, 2), fin = get(3, 1);
-  if (sf1) { sf1.player_a_id = winnerOf(get(1, 1)); sf1.player_b_id = winnerOf(get(1, 2)); sf1.winner_id = winnerOf(sf1); }
-  if (sf2) { sf2.player_a_id = winnerOf(get(1, 3)); sf2.player_b_id = winnerOf(get(1, 4)); sf2.winner_id = winnerOf(sf2); }
-  if (fin) { fin.player_a_id = winnerOf(sf1); fin.player_b_id = winnerOf(sf2); fin.winner_id = winnerOf(fin); }
+  const maxR = Math.max(...matches.map(m => m.round || 1));
+  // round 1: just settle winners
+  matches.filter(m => m.round === 1).forEach(mt => { mt[W] = winnerOf(mt); });
+  // rounds 2..maxR: fill slots from the previous round, then settle
+  for (let r = 2; r <= maxR; r++) {
+    matches.filter(m => m.round === r).forEach(mt => {
+      const feedA = get(r - 1, mt.match_number * 2 - 1);
+      const feedB = get(r - 1, mt.match_number * 2);
+      mt[A] = feedA ? winnerOf(feedA) : mt[A];
+      mt[B] = feedB ? winnerOf(feedB) : mt[B];
+      mt[W] = winnerOf(mt);
+    });
+  }
   return matches;
 }
 
@@ -1392,8 +1467,8 @@ function playoffPhaseStarted(nightId) {
   return nightPlayoffMatches(nightId).some(m => (m.a_legs || 0) + (m.b_legs || 0) > 0);
 }
 function didoNightWinner(nightId) {
-  const fin = nightPlayoffMatches(nightId).find(m => m.round === 3);
-  return fin ? fin.winner_id : null;
+  const fin = playoffFinalMatch(nightId);
+  return fin ? (fin.winner_id || fin.winner_team_id || null) : null;
 }
 
 // DIDO block standings from loaded global state (blocks / results / blockPlayers).
@@ -1443,8 +1518,8 @@ function didoStateStandings(nightId) {
 // The night's DIDO winner: the playoff Final winner, or (no playoff at all) the block-standings leader.
 function didoNightWinnerId(nightId) {
   const pm = (state.nightPlayoffs || []).filter(m => m.night_id === nightId);
-  const fin = pm.find(m => m.round === 3 && m.winner_id);
-  if (fin) return fin.winner_id;
+  const fin = playoffFinalMatch(nightId);
+  if (fin && fin.winner_id) return fin.winner_id;
   if (pm.length) return null;                     // playoff bracket exists but not finished
   const st = didoStateStandings(nightId);
   return st.length ? st[0].pid : null;
@@ -1456,8 +1531,9 @@ async function persistPlayoffMatches(matches) {
     round: m.round, match_number: m.match_number,
     slot_a_seed: m.slot_a_seed || null, slot_b_seed: m.slot_b_seed || null,
     player_a_id: m.player_a_id || null, player_b_id: m.player_b_id || null,
+    team_a_id: m.team_a_id || null, team_b_id: m.team_b_id || null,
     a_legs: m.a_legs || 0, b_legs: m.b_legs || 0,
-    winner_id: m.winner_id || null, best_of: m.best_of,
+    winner_id: m.winner_id || null, winner_team_id: m.winner_team_id || null, best_of: m.best_of,
     updated_at: new Date().toISOString()
   }));
   const { error } = await sb.from('night_playoff_matches').upsert(rows, { onConflict: 'id' });
@@ -1502,6 +1578,50 @@ async function generateDidoPlayoffs() {
   state.loading = false; render();
 }
 
+// Generic seeded playoff for any competition (not DIDO — it keeps its own block-based seeding).
+// size ∈ {4,8,16} singles / {4,8} teams. Sequential pairing (1v2, 3v4, …). Auto-seeded from the
+// combined round-robin standings; admin can then adjust seeds before results are entered.
+async function generateCompPlayoffs(nightId, size) {
+  if (!state.activeNight || !isAdmin()) return;
+  size = parseInt(size) || 8;
+  if (playoffPhaseStarted(nightId)) { showToast('Playoff results already entered — reset the bracket first', 'error'); return; }
+  const night = state.nights.find(n => n.id === nightId) || state.activeNight;
+  const team = isTeamComp(night);
+  const standings = compRoundRobinStandings(nightId).filter(r => r.gp > 0);
+  if (standings.length < size) { showToast(`Need ${size} entrants with games played — only ${standings.length} so far`, 'error'); return; }
+  const top = standings.slice(0, size);
+  const rounds = Math.log2(size);
+
+  state.loading = true; render();
+  try {
+    await sb.from('night_playoff_matches').delete().eq('night_id', nightId);
+    const rows = [];
+    for (let m = 1; m <= size / 2; m++) {
+      const a = top[2 * (m - 1)], b = top[2 * (m - 1) + 1];
+      rows.push({
+        space_id: SPACE_ID, night_id: nightId, round: 1, match_number: m,
+        slot_a_seed: 2 * (m - 1) + 1, slot_b_seed: 2 * (m - 1) + 2,
+        player_a_id: team ? null : a.pid, player_b_id: team ? null : b.pid,
+        team_a_id: team ? a.teamId : null, team_b_id: team ? b.teamId : null,
+        a_legs: 0, b_legs: 0, best_of: 1,
+      });
+    }
+    for (let r = 2; r <= rounds; r++) {
+      for (let m = 1; m <= size / Math.pow(2, r); m++) {
+        rows.push({ space_id: SPACE_ID, night_id: nightId, round: r, match_number: m, a_legs: 0, b_legs: 0, best_of: r === rounds ? 5 : 1 });
+      }
+    }
+    const { error } = await sb.from('night_playoff_matches').insert(rows);
+    if (error) throw error;
+    await loadNightPlayoffs(nightId);
+    showToast(`${size}-${team ? 'team' : 'player'} playoff bracket generated`);
+  } catch (e) {
+    console.error('generateCompPlayoffs', e);
+    showToast('Error generating playoffs: ' + (e.message || e), 'error');
+  }
+  state.loading = false; render();
+}
+
 async function resetDidoPlayoffs() {
   if (!state.activeNight || !isAdmin()) return;
   if (!confirm('Clear the entire playoff bracket for this night?')) return;
@@ -1527,30 +1647,42 @@ async function setPlayoffPlayer(matchId, slot, playerId) {
   render();
 }
 
+async function setPlayoffTeam(matchId, slot, teamId) {
+  if (!isAdmin()) return;
+  const nightId = state.activeNight && state.activeNight.id;
+  if (playoffPhaseStarted(nightId)) { showToast('Reset the bracket to change teams', 'error'); return; }
+  const matches = nightPlayoffMatches(nightId);
+  const mt = matches.find(m => m.id === matchId);
+  if (!mt) return;
+  mt[slot === 'a' ? 'team_a_id' : 'team_b_id'] = teamId || null;
+  recomputeBracket(matches);
+  if (await persistPlayoffMatches(matches)) await loadNightPlayoffs(nightId);
+  render();
+}
+
 async function updatePlayoffLegs(matchId, slot, val) {
   if (!isAdmin()) return;
   const nightId = state.activeNight && state.activeNight.id;
   const matches = nightPlayoffMatches(nightId);
   const mt = matches.find(m => m.id === matchId);
   if (!mt) return;
-  const cap = mt.best_of === 1 ? 1 : 3;
-  mt[slot === 'a' ? 'a_legs' : 'b_legs'] = Math.max(0, Math.min(cap, parseInt(val) || 0));
+  mt[slot === 'a' ? 'a_legs' : 'b_legs'] = Math.max(0, Math.min(99, parseInt(val) || 0));
   recomputeBracket(matches);
   if (await persistPlayoffMatches(matches)) await loadNightPlayoffs(nightId);
   render();
 }
 
-function renderDidoPlayoffs() {
+// Playoff bracket panel — DIDO or any competition (singles player-bracket or team-bracket).
+function renderPlayoffPanel() {
   const night = state.activeNight;
   if (!night) return '';
   const nightId = night.id;
   const isDido = nightIsDido(night);
-  const matches = nightPlayoffMatches(nightId).slice().sort((a, b) => a.round - b.round || a.match_number - b.match_number);
-  // Show for DIDO nights (which can auto-generate a bracket) or any competition night that already has one.
-  if (!isDido && !(isCompNight(night.night_type_id) && matches.length)) return '';
+  if (!isDido && !isCompNight(night.night_type_id)) return '';   // Wednesday etc. — never
+  const team = !isDido && isTeamComp(night);
   const admin = isAdmin();
+  const matches = nightPlayoffMatches(nightId).slice().sort((a, b) => a.round - b.round || a.match_number - b.match_number);
   const started = playoffPhaseStarted(nightId);
-  const blocks = state.nightBlocks || [];
   const kind = isDido ? 'DIDO ' : '';
 
   const shell = (inner) => `
@@ -1562,54 +1694,75 @@ function renderDidoPlayoffs() {
       ${inner}
     </div>`;
 
-  // No playoff bracket — for DIDO, the night's winner is the block-standings leader.
-  const stdWinner = isDido ? didoNightWinnerId(nightId) : null;
-  const stdBanner = stdWinner
-    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 ${kind}WINNER — ${(state.players.find(x => x.id === stdWinner) || {}).first_name || ''} ${(state.players.find(x => x.id === stdWinner) || {}).last_name || ''}<div style="font-size:0.6rem;letter-spacing:0.06em;opacity:0.85;margin-top:2px">BY BLOCK STANDINGS · NO PLAYOFF</div></div>`
-    : '';
+  const teamName = (id) => { const t = compTeamsFor(nightId).find(x => x.id === id); return t ? compTeamName(t) : '?'; };
+  const slotId = (mt, slot) => team ? mt['team_' + slot + '_id'] : mt['player_' + slot + '_id'];
+  const slotName = (mt, slot, fb) => { const id = slotId(mt, slot); return id ? (team ? teamName(id) : (playerName(id) || '?')) : (fb || '—'); };
+  const winId = (mt) => mt ? (team ? mt.winner_team_id : mt.winner_id) : null;
 
+  // ─────────── no bracket yet ───────────
   if (!matches.length) {
-    // (non-DIDO comps only reach here with a bracket; the guard above hides an empty panel)
-    const q = didoQualifiers();
-    const ready = q.length === 4 && q.every(x => x.first && x.second);
-    if (!admin) return shell(`<div style="font-size:0.75rem;color:var(--text-muted)">${stdWinner ? 'No playoff was played this night.' : 'No playoff bracket yet.'}</div>${stdBanner}`);
-    const tieNote = q.some(x => x.secondTied)
-      ? `<div style="font-size:0.72rem;color:#FFA500;margin-bottom:8px">⚠ A block's 2nd place is tied on head-to-head — you can correct the seed after generating.</div>` : '';
+    if (!admin) {
+      const w = isDido ? didoNightWinnerId(nightId) : null;
+      return w ? shell(`<div style="font-size:0.85rem;color:var(--green-accent);font-weight:700">🏆 ${kind}WINNER — ${playerName(w)} <span style="font-size:0.66rem;color:var(--text-muted);font-weight:400">(by block standings, no playoff)</span></div>`) : '';
+    }
+    if (isDido) {
+      const q = didoQualifiers();
+      const ready = q.length === 4 && q.every(x => x.first && x.second);
+      const stdW = didoNightWinnerId(nightId);
+      return shell(`
+        ${q.some(x => x.secondTied) ? `<div style="font-size:0.72rem;color:#FFA500;margin-bottom:8px">⚠ A block's 2nd place is tied on head-to-head — you can correct the seed after generating.</div>` : ''}
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">${ready ? 'Top 2 of each block seed an 8-player knockout.' : `Needs exactly 4 blocks with a clear top 2 (currently ${(state.nightBlocks || []).length}). Without a playoff the DIDO goes to the block-standings leader${stdW ? ' — ' + playerName(stdW) : ''}.`}</div>
+        <button class="btn btn-primary" style="font-size:0.82rem;padding:9px 16px" ${ready ? '' : 'disabled'} onclick="generateDidoPlayoffs()">⚡ Generate Playoffs</button>`);
+    }
+    // any other competition — conclude vs playoff
+    const stand = compRoundRobinStandings(nightId).filter(r => r.gp > 0);
+    const savedOk = team || night.status !== 'draft' || (state.blocks || []).some(x => x.night_id === nightId);
+    const sizes = (team ? [4, 8] : [4, 8, 16]).filter(s => s <= stand.length);
+    const concludeFn = team ? "setCompStatus('locked')" : "submitNight()";
     return shell(`
-      ${tieNote}
-      <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">
-        ${q.length === 4 ? 'Top 2 of each block seed an 8-player knockout — QF is 1 leg, SF &amp; Final are 3 legs.' : `Needs exactly 4 blocks with a complete top 2 (currently ${blocks.length}). No playoff = the DIDO goes to the block-standings leader.`}
-      </div>
-      <button class="btn btn-primary" style="font-size:0.82rem;padding:9px 16px" ${ready ? '' : 'disabled'} onclick="generateDidoPlayoffs()">⚡ Generate Playoffs</button>
-      ${stdBanner}
-    `);
+      <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">How is this competition decided?</div>
+      ${stand.length < 4 ? `<div style="font-size:0.72rem;color:var(--text-muted)">Enter more round-robin results first — a playoff needs at least 4 ${team ? 'teams' : 'players'} with games played.</div>` : `
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <button class="btn btn-ghost" style="font-size:0.8rem;padding:8px 14px" onclick="${concludeFn}">Conclude — rank by round-robin</button>
+          <span style="color:var(--text-muted);font-size:0.72rem">— or —</span>
+          ${savedOk && sizes.length ? `
+            <select id="pf-size" style="background:var(--card2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.78rem;padding:5px 6px">
+              ${sizes.map(s => `<option value="${s}">${s} ${team ? 'teams' : 'players'}</option>`).join('')}
+            </select>
+            <button class="btn btn-primary" style="font-size:0.8rem;padding:8px 14px" onclick="generateCompPlayoffs('${nightId}', document.getElementById('pf-size').value)">Generate Playoffs</button>
+          ` : `<span style="font-size:0.72rem;color:#FFA500">${savedOk ? 'Not enough entrants for a bracket yet.' : 'Save Draft your block results first, then a playoff can be generated.'}</span>`}
+        </div>`}`);
   }
 
-  const nameOf = (pid, fb) => {
-    if (!pid) return fb || '—';
-    const p = state.players.find(x => x.id === pid);
-    return p ? `${p.first_name} ${p.last_name}` : '?';
-  };
-  const participantIds = [...new Set(blocks.flatMap(b => (b.slots || []).map(s => Array.isArray(s) ? s.filter(Boolean)[0] : s)).filter(Boolean))];
-  const playerOptions = (selId) => ['<option value="">—</option>'].concat(
-    participantIds.map(id => state.players.find(p => p.id === id)).filter(Boolean)
-      .sort((a, z) => (a.first_name + a.last_name).localeCompare(z.first_name + z.last_name))
-      .map(p => `<option value="${p.id}" ${p.id === selId ? 'selected' : ''}>${pickerAttr(p.first_name + ' ' + p.last_name)}</option>`)
-  ).join('');
+  // ─────────── bracket exists ───────────
+  const maxR = Math.max(...matches.map(m => m.round));
+  const roundName = (r) => r === maxR ? 'Final' : r === maxR - 1 ? 'Semi Finals' : r === maxR - 2 ? 'Quarter Finals' : `Round ${r}`;
   const get = (r, m) => matches.find(x => x.round === r && x.match_number === m);
+  const editable = admin && !started;
+
+  let seedOpts;
+  if (team) {
+    seedOpts = (sel) => ['<option value="">—</option>'].concat(compTeamsFor(nightId).map(t => `<option value="${t.id}" ${t.id === sel ? 'selected' : ''}>${pickerAttr(compTeamName(t))}</option>`)).join('');
+  } else {
+    const ids = [...new Set((state.nightBlocks || []).flatMap(b => (b.slots || []).map(s => Array.isArray(s) ? s.filter(Boolean)[0] : s)).filter(Boolean))];
+    seedOpts = (sel) => ['<option value="">—</option>'].concat(ids.map(id => state.players.find(p => p.id === id)).filter(Boolean)
+      .sort((a, z) => (a.first_name + a.last_name).localeCompare(z.first_name + z.last_name))
+      .map(p => `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${pickerAttr(p.first_name + ' ' + p.last_name)}</option>`)).join('');
+  }
+  const setFn = team ? 'setPlayoffTeam' : 'setPlayoffPlayer';
 
   const matchCard = (mt, fbA, fbB) => {
     if (!mt) return '<div style="min-width:190px"></div>';
-    const editable = admin && !started && mt.round === 1;
+    const canPick = editable && mt.round === 1;
     const legCell = (slot) => admin
-      ? `<input type="number" min="0" max="${mt.best_of === 1 ? 1 : 3}" value="${mt[slot === 'a' ? 'a_legs' : 'b_legs'] || 0}" onchange="updatePlayoffLegs('${mt.id}','${slot}',this.value)" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.76rem;font-family:'Share Tech Mono',monospace">`
+      ? `<input type="number" min="0" max="99" value="${mt[slot === 'a' ? 'a_legs' : 'b_legs'] || 0}" onchange="updatePlayoffLegs('${mt.id}','${slot}',this.value)" style="width:28px;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;font-size:0.76rem;font-family:'Share Tech Mono',monospace">`
       : `<span style="font-family:'Share Tech Mono',monospace;font-weight:700;width:20px;text-align:center;display:inline-block">${mt[slot === 'a' ? 'a_legs' : 'b_legs'] || 0}</span>`;
     const side = (slot, seed, fb) => {
-      const pid = slot === 'a' ? mt.player_a_id : mt.player_b_id;
-      const win = mt.winner_id && mt.winner_id === pid;
-      const nameCell = editable
-        ? `<select onchange="setPlayoffPlayer('${mt.id}','${slot}',this.value)" style="flex:1;min-width:0;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:0.7rem;padding:2px 3px">${playerOptions(pid)}</select>`
-        : `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem;font-weight:${win ? '700' : '500'};color:${win ? 'var(--green-accent)' : 'var(--text)'}">${nameOf(pid, fb)}</span>`;
+      const id = slotId(mt, slot);
+      const win = winId(mt) && winId(mt) === id;
+      const nameCell = canPick
+        ? `<select onchange="${setFn}('${mt.id}','${slot}',this.value)" style="flex:1;min-width:0;background:var(--card2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:0.7rem;padding:2px 3px">${seedOpts(id)}</select>`
+        : `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem;font-weight:${win ? '700' : '500'};color:${win ? 'var(--green-accent)' : 'var(--text)'}">${slotName(mt, slot, fb)}</span>`;
       return `<div style="display:flex;align-items:center;gap:5px;padding:3px 5px;border-radius:3px;background:${win ? 'rgba(45,106,45,0.15)' : 'transparent'}">
         ${seed ? `<span style="font-size:0.58rem;color:var(--text-muted);font-family:'Share Tech Mono',monospace;width:10px">${seed}</span>` : ''}
         ${nameCell}${legCell(slot)}
@@ -1621,27 +1774,30 @@ function renderDidoPlayoffs() {
       ${side('b', mt.slot_b_seed, fbB)}
     </div>`;
   };
-
   const col = (title, cards) => `<div style="display:flex;flex-direction:column;gap:12px;justify-content:space-around">
     <div style="font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);text-align:center">${title}</div>${cards}</div>`;
 
-  const champ = didoNightWinner(nightId);
-  const banner = champ
-    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 ${kind}WINNER — ${nameOf(champ)}</div>`
+  const cols = [];
+  for (let r = 1; r <= maxR; r++) {
+    const n = matches.filter(m => m.round === r).length;
+    const cards = Array.from({ length: n }, (_, k) => matchCard(get(r, k + 1),
+      r > 1 ? `Winner ${roundName(r - 1)} ${k * 2 + 1}` : '',
+      r > 1 ? `Winner ${roundName(r - 1)} ${k * 2 + 2}` : '')).join('');
+    cols.push(col(roundName(r), cards));
+  }
+
+  const champId = winId(get(maxR, 1));
+  const banner = champId
+    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 ${kind}WINNER — ${team ? teamName(champId) : playerName(champId)}</div>`
     : '';
 
   return shell(`
-    ${admin && !started ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:8px">Setup — fix any QF seed the auto-pick got wrong, then enter results. Entering a leg locks the seeds.</div>` : ''}
-    <div style="overflow-x:auto">
-      <div style="display:flex;gap:20px;min-width:620px;align-items:stretch">
-        ${col('Quarter Finals', [get(1, 1), get(1, 2), get(1, 3), get(1, 4)].map(m => matchCard(m)).join(''))}
-        ${col('Semi Finals', matchCard(get(2, 1), 'Winner QF1', 'Winner QF2') + matchCard(get(2, 2), 'Winner QF3', 'Winner QF4'))}
-        ${col('Final', matchCard(get(3, 1), 'Winner SF1', 'Winner SF2'))}
-      </div>
-    </div>
+    ${editable ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:8px">Setup — fix any seed the auto-pick got wrong, then enter the final score of each match. Entering a leg locks the seeds.</div>` : ''}
+    <div style="overflow-x:auto"><div style="display:flex;gap:20px;min-width:${maxR * 215}px;align-items:stretch">${cols.join('')}</div></div>
     ${banner}
   `);
 }
+function renderDidoPlayoffs() { return renderPlayoffPanel(); }
 
 // ═══════════════════════════════════════════════
 // TEAM COMPETITION — mutations + entry view
@@ -1718,7 +1874,7 @@ async function updateCompDates(startVal, endVal) {
 async function updateCompMatch(session, forSeed, vsSeed, val) {
   if (!state.activeNight || !isAdmin() || forSeed === vsSeed) return;
   const nightId = state.activeNight.id;
-  const v = Math.max(0, Math.min(9, parseInt(val) || 0));
+  const v = Math.max(0, Math.min(99, parseInt(val) || 0));
   const lo = Math.min(forSeed, vsSeed), hi = Math.max(forSeed, vsSeed);
   const field = forSeed === lo ? 'a_legs' : 'b_legs';
   const existing = compMatchesFor(nightId).find(m => m.session === session && m.team_a_seed === lo && m.team_b_seed === hi);
@@ -1916,7 +2072,7 @@ function renderDoublesComp() {
               ${teams.map(col => {
                 if (col.seed === row.seed) return `<td style="background:#1A1A1A"></td>`;
                 return `<td style="padding:1px;text-align:center">
-                  <input type="number" min="0" max="9" value="${legAt(row.seed, col.seed)}" ${admin && !locked ? '' : 'disabled'}
+                  <input type="number" min="0" max="99" value="${legAt(row.seed, col.seed)}" ${admin && !locked ? '' : 'disabled'}
                     onchange="updateCompMatch(${sess},${row.seed},${col.seed},this.value)"
                     style="width:30px;background:transparent;border:none;color:var(--text);text-align:center;font-size:0.85rem;font-family:'Share Tech Mono',monospace;font-weight:700">
                 </td>`;
@@ -1929,8 +2085,13 @@ function renderDoublesComp() {
       </table>
     </div>`;
 
-  const champTeam = (standings.length && standings[0].gp) ? standings[0] : null;
-  const champBanner = (champTeam && locked)
+  // Winner: the playoff-winning team if there's a bracket, else the round-robin leader (once locked).
+  const playoffTeamId = compChampionTeamId(nightId);
+  const hasBracket = nightPlayoffMatches(nightId).length > 0;
+  const champTeam = playoffTeamId
+    ? { name: (compTeamsFor(nightId).find(t => t.id === playoffTeamId) ? compTeamName(compTeamsFor(nightId).find(t => t.id === playoffTeamId)) : '?') }
+    : (!hasBracket && standings.length && standings[0].gp ? standings[0] : null);
+  const champBanner = (champTeam && (locked || playoffTeamId))
     ? `<div style="margin-bottom:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 WINNERS — ${pickerAttr(champTeam.name)}</div>`
     : '';
 
@@ -1948,7 +2109,7 @@ function renderDoublesComp() {
           <tbody>
             ${standings.map(r => `<tr>
               <td style="text-align:center;font-weight:700;color:var(--green-accent)">${r.pos}</td>
-              <td style="text-align:left;white-space:nowrap;font-weight:600">${(r.pos === 1 && r.gp && locked) ? '🏆 ' : ''}${pickerAttr(r.name)}</td>
+              <td style="text-align:left;white-space:nowrap;font-weight:600">${(r.pos === 1 && r.gp && locked && !hasBracket) ? '🏆 ' : ''}${pickerAttr(r.name)}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.gp}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.lw}</td>
               <td style="text-align:center;color:var(--text-muted)">${r.gw}</td>
@@ -1998,6 +2159,7 @@ function renderDoublesComp() {
         <div style="margin-top:10px">${grid}</div>
       </div>
       ${standingsTable}
+      ${renderPlayoffPanel()}
       ${accList}
       ${footerNote}
     </div>`;
@@ -2067,6 +2229,7 @@ async function writeNightBlocks(blockStatus) {
       block_label: b.label,
       size: b.size,
       bonus: b.bonus || 0,
+      session: b.session || 1,
       status: blockStatus
     }).select().single();
     if (blockErr) throw blockErr;
@@ -2539,7 +2702,7 @@ function renderHomeCompetitions() {
   // (no playoff) sit here.
   const compNights = getCompNights()
     .filter(n => n.status === 'locked' || n.status === 'submitted')
-    .filter(n => !compChampionId(n.id))
+    .filter(n => !compChampionId(n.id) && !compChampionTeamId(n.id))
     .slice(0, 12);
   if (!compNights.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No competitions recorded yet.</div>';
 
@@ -2755,15 +2918,28 @@ function getAllChampions() {
     .filter(n => n.status === 'locked' || n.status === 'submitted')
     .map(n => {
       const nt = state.nightTypes.find(t => t.id === n.night_type_id);
-      const pid = nightIsDido(n)
-        ? didoNightWinnerId(n.id)
-        : (isCompNight(n.night_type_id) ? compChampionId(n.id) : null);
+      if (nightIsDido(n)) {
+        const pid = didoNightWinnerId(n.id);
+        const p = pid && state.players.find(x => x.id === pid);
+        if (!p) return null;
+        return {
+          name: `${p.first_name || ''}${p.nickname ? ` "${p.nickname}"` : ''}${p.last_name ? ` ${p.last_name}` : ''}`.trim(),
+          playerId: pid, date: n.date, nightId: n.id, comp: nt ? nt.name : 'Competition',
+        };
+      }
+      if (!isCompNight(n.night_type_id)) return null;
+      if (isTeamComp(n)) {
+        const teamId = compChampionTeamId(n.id);
+        const team = teamId && compTeamsFor(n.id).find(t => t.id === teamId);
+        if (!team) return null;
+        return { name: compTeamName(team), teamId, date: n.date, nightId: n.id, comp: nt ? nt.name : 'Competition' };
+      }
+      const pid = compChampionId(n.id);
       const p = pid && state.players.find(x => x.id === pid);
       if (!p) return null;
       return {
         name: `${p.first_name || ''}${p.nickname ? ` "${p.nickname}"` : ''}${p.last_name ? ` ${p.last_name}` : ''}`.trim(),
-        playerId: pid, date: n.date, nightId: n.id,
-        comp: nt ? nt.name : 'Competition',
+        playerId: pid, date: n.date, nightId: n.id, comp: nt ? nt.name : 'Competition',
       };
     })
     .filter(Boolean)
@@ -3093,9 +3269,15 @@ function playerCompWins(playerId) {
       const title = typeName + (n.notes ? ' · ' + n.notes : '');
       if (nightIsDido(n)) return;
       if (isTeamComp(n)) {
-        const st = getDoublesStandings(n.id);
-        if (!st.length || !st[0].gp) return;
-        const team = compTeamsFor(n.id).find(t => t.seed === st[0].seed);
+        // playoff-winning team if there's a bracket, else the round-robin leader
+        const champTeamId = compChampionTeamId(n.id);
+        let team;
+        if (champTeamId) team = compTeamsFor(n.id).find(t => t.id === champTeamId);
+        else {
+          const st = getDoublesStandings(n.id);
+          if (!st.length || !st[0].gp || playoffFinalMatch(n.id)) return;  // bracket exists but unfinished → no win yet
+          team = compTeamsFor(n.id).find(t => t.seed === st[0].seed);
+        }
         if (!team) return;
         const ids = [team.player1_id, team.player2_id, team.player3_id].filter(Boolean);
         if (!ids.includes(playerId)) return;
@@ -3105,8 +3287,7 @@ function playerCompWins(playerId) {
         });
         wins.push({ icon: '🥇', title, sub: partners.length ? 'with ' + partners.join(' & ') : '', date: n.date, end: n.end_date });
       } else {
-        const fin = (state.nightPlayoffs || []).find(m => m.night_id === n.id && m.round === 3 && m.winner_id === playerId);
-        if (fin) wins.push({ icon: '🥇', title, sub: '', date: n.date, end: n.end_date });
+        if (compChampionId(n.id) === playerId) wins.push({ icon: '🥇', title, sub: '', date: n.date, end: n.end_date });
       }
     });
   getDidoChampions().filter(c => c.playerId === playerId).forEach(c => {
@@ -3569,8 +3750,8 @@ function renderRoundsLookup(blockIdx) {
   const N = b.size;
   const rounds = MATCH_SCHEDULES[N];
   const label = b.label || `Block ${blockIdx + 1}`;
-  const per = nightMatchLegs();
-  const bestOfLabel = per === 1 ? 'Single game (1 leg)' : `${per} legs per match`;
+  const ntId = state.activeNight && state.activeNight.night_type_id;
+  const bestOfLabel = legCap(ntId) === 3 ? '3 legs per match, most wins' : 'Flexible legs — most wins';
 
   const shell = (inner) => `
     <div class="card" style="padding:14px">
@@ -3592,7 +3773,8 @@ function renderRoundsLookup(blockIdx) {
     a: (b.legs[aS - 1] && b.legs[aS - 1][bS - 1]) || 0,
     z: (b.legs[bS - 1] && b.legs[bS - 1][aS - 1]) || 0
   });
-  const isComplete = (a, z) => a + z === per && a !== z;
+  const cap = legCap(ntId);
+  const isComplete = (a, z) => a !== z && (cap === 3 ? a + z === 3 : a + z > 0);
   const statusFor = (a, z) => isComplete(a, z) ? 'Complete' : (a === 0 && z === 0 ? 'Pending' : 'In Progress');
 
   let upNext = null;
@@ -3739,6 +3921,15 @@ function renderScheduleAssistant() {
 function renderBlockEntry() {
   const night = state.activeNight;
   const nightTypeName = night.night_type_id ? state.nightTypes.find(nt=>nt.id===night.night_type_id)?.name||'League Night' : 'League Night';
+  // Competition block sheets support sessions (Wednesday league nights do not).
+  const isComp = isCompNight(night.night_type_id);
+  const sessions = isComp ? compSessions(night.id) : [1];
+  if (!sessions.includes(state.compSession)) state.compSession = sessions[0] || 1;
+  const inSession = (bl) => !isComp || (bl.session || 1) === state.compSession;
+  if (!state.nightBlocks[state.activeBlockIdx] || !inSession(state.nightBlocks[state.activeBlockIdx])) {
+    const idx = state.nightBlocks.findIndex(inSession);
+    if (idx >= 0) state.activeBlockIdx = idx;
+  }
   const b = state.nightBlocks[state.activeBlockIdx];
   if (!b) return '<div style="padding:20px;color:var(--text-muted)">Loading...</div>';
 
@@ -3756,7 +3947,6 @@ function renderBlockEntry() {
   const bFmt = b.format || 'singles';
   const bPps = getPlayersPerSlot(bFmt);
   const bIsTeam = bFmt !== 'singles';
-  const matchLegs = nightMatchLegs(night.night_type_id); // DIDO = 1 leg, else 3 legs per match
 
   // Build table rows
   const rows = Array.from({length: N}, (_, r) => {
@@ -3813,7 +4003,7 @@ function renderBlockEntry() {
       const val = b.legs[r][c] || 0;
       const lc = legColor(val);
       return `<td style="padding:1px;text-align:center;background:${lc};transition:background 0.15s">
-        <input type="number" min="0" max="${matchLegs}" value="${val}"
+        <input type="number" min="0" max="${legCap(night.night_type_id)}" value="${val}"
           style="width:34px;background:transparent;border:none;color:var(--text);text-align:center;padding:3px 2px;font-size:0.9rem;font-family:'Share Tech Mono',monospace;font-weight:700"
           onchange="updateLeg(${state.activeBlockIdx},${r},${c},this.value)"
           ${(!hasPlayer || night.viewOnly) ? 'disabled' : ''}>
@@ -3924,8 +4114,13 @@ function renderBlockEntry() {
           </div>
         </div>
 
+        ${isComp && (sessions.length > 1 || !night.viewOnly) ? `
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:12px">
+          ${sessions.map(s => `<button class="btn ${s===state.compSession?'btn-primary':'btn-ghost'}" style="font-size:0.72rem;padding:4px 12px" onclick="state.compSession=${s};render()">Session ${s}</button>`).join('')}
+          ${!night.viewOnly ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:4px 10px" onclick="addSinglesSession()">+ Session</button>` : ''}
+        </div>` : ''}
         <div class="tab-group" style="margin-top:12px">
-          ${state.nightBlocks.map((bl, i) => `
+          ${state.nightBlocks.map((bl, i) => ({ bl, i })).filter(x => inSession(x.bl)).map(({ bl, i }) => `
             <div class="tab-btn ${i===state.activeBlockIdx?'active':''}" onclick="state.activeBlockIdx=${i};render()">${bl.label}</div>
           `).join('')}
         </div>
@@ -4041,8 +4236,11 @@ function renderCompetitions() {
             <tbody>
               ${completed.map(n => {
                 let winner = '—';
-                if (isTeamComp(n)) { winner = getDoublesWinner(n.id) || '—'; }
-                else {
+                if (isTeamComp(n)) {
+                  const teamId = compChampionTeamId(n.id);   // playoff champion first
+                  const team = teamId && compTeamsFor(n.id).find(t => t.id === teamId);
+                  winner = team ? compTeamName(team) : (getDoublesWinner(n.id) || '—');
+                } else {
                   winner = playerName(compChampionId(n.id));  // playoff champion first
                   if (!winner) { const s = getCompStandings(n.id); winner = s.length && s[0].players.length ? s[0].players[0].name : '—'; }
                 }
