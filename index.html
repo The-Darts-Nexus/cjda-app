@@ -2534,9 +2534,12 @@ function renderHeader() {
 // ═══════════════════════════════════════════════
 
 function renderHomeCompetitions() {
-  // One column per completed competition, most recent first — nothing collapses/hides.
+  // One column per completed competition, most recent first. Rule: a competition that was
+  // decided by a PLAYOFF is shown in the CHAMPIONS card only; ones with a clean 1st/2nd/3rd
+  // (no playoff) sit here.
   const compNights = getCompNights()
     .filter(n => n.status === 'locked' || n.status === 'submitted')
+    .filter(n => !compChampionId(n.id))
     .slice(0, 12);
   if (!compNights.length) return '<div style="text-align:center;color:var(--text-muted);font-size:0.78rem;padding:12px">No competitions recorded yet.</div>';
 
@@ -2705,11 +2708,14 @@ function renderHome() {
         </div>
         <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
           ${champs.map(c => `
-            <div class="card2" style="padding:6px 12px;display:flex;align-items:center;gap:8px">
+            <div class="card2" style="padding:6px 12px;display:flex;align-items:flex-start;gap:8px;min-width:200px">
               <span style="font-size:0.9rem">🏆</span>
-              <div>
-                <div style="font-size:0.8rem;font-weight:700;color:var(--green-accent)">${c.name}</div>
-                <div style="font-size:0.62rem;color:var(--text-muted)">${c.comp} · ${formatDate(c.date)}</div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;justify-content:space-between;gap:10px">
+                  <span style="font-size:0.8rem;font-weight:700;color:var(--green-accent)">${c.name}</span>
+                  <span style="font-size:0.62rem;color:var(--text-muted);white-space:nowrap">${formatDate(c.date)}</span>
+                </div>
+                <div style="font-size:0.66rem;color:var(--text-muted)">${c.comp}</div>
               </div>
             </div>`).join('')}
         </div>
@@ -2755,9 +2761,9 @@ function getAllChampions() {
       const p = pid && state.players.find(x => x.id === pid);
       if (!p) return null;
       return {
-        name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
+        name: `${p.first_name || ''}${p.nickname ? ` "${p.nickname}"` : ''}${p.last_name ? ` ${p.last_name}` : ''}`.trim(),
         playerId: pid, date: n.date, nightId: n.id,
-        comp: (nt ? nt.name : 'Competition') + (n.notes ? ' · ' + n.notes : ''),
+        comp: nt ? nt.name : 'Competition',
       };
     })
     .filter(Boolean)
