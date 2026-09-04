@@ -479,6 +479,16 @@ function getCompStandings(nightId) {
   });
 }
 
+// Playoff champion of a competition night, if one was played (Final = round 3 winner).
+function compChampionId(nightId) {
+  const fin = (state.nightPlayoffs || []).find(m => m.night_id === nightId && m.round === 3 && m.winner_id);
+  return fin ? fin.winner_id : null;
+}
+function playerName(id) {
+  const p = id && state.players.find(x => x.id === id);
+  return p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : null;
+}
+
 
 function fmtGdfDate(startStr, endStr) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -2551,8 +2561,15 @@ function renderHomeCompetitions() {
     const typeName = nt ? nt.name : 'Competition';
     const title = `${typeName}${n.notes ? ' · ' + pickerAttr(n.notes) : ''}`;
     if (isTeamComp(n)) return column(title, formatDate(n.date), teamRows(n));
-    // Singles competition — per-block player standings.
-    const body = getCompStandings(n.id).map(grp => {
+    // Singles competition — playoff champion (if any) on top, then per-block player standings.
+    const champ = playerName(compChampionId(n.id));
+    const champBanner = champ
+      ? `<div style="display:flex;align-items:center;gap:6px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:5px;padding:4px 8px;margin-bottom:8px">
+           <span>🏆</span><span style="font-size:0.78rem;font-weight:700;color:#fff">${champ}</span>
+           <span style="font-size:0.6rem;color:rgba(255,255,255,0.8);margin-left:auto">CHAMPION</span>
+         </div>`
+      : '';
+    const body = champBanner + getCompStandings(n.id).map(grp => {
       const top3 = grp.players.slice(0, 3);
       return `
           <div style="margin-bottom:8px">
@@ -4000,7 +4017,10 @@ function renderCompetitions() {
               ${completed.map(n => {
                 let winner = '—';
                 if (isTeamComp(n)) { winner = getDoublesWinner(n.id) || '—'; }
-                else { const s = getCompStandings(n.id); winner = s.length && s[0].players.length ? s[0].players[0].name : '—'; }
+                else {
+                  winner = playerName(compChampionId(n.id));  // playoff champion first
+                  if (!winner) { const s = getCompStandings(n.id); winner = s.length && s[0].players.length ? s[0].players[0].name : '—'; }
+                }
                 return `<tr>
                   <td class="mono" style="font-size:0.78rem">${formatDate(n.date)}</td>
                   <td style="font-size:0.75rem;color:var(--text-muted)">${state.nightTypes.find(t=>t.id===n.night_type_id)?.name||'—'}${n.notes?' — '+n.notes:''}</td>
