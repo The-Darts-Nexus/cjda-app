@@ -544,6 +544,13 @@ Home cards, oversized header); tablet/desktop are "perfect" and must not change.
 `data-col` (hide DSA/Nick/Cellphone on the roster). No JS. Verified identical desktop computed
 styles at 1200px. Commits `8bcbd1a`, `7beebc7` (doc). See [[mobile-responsive]] memory.
 
+### 2026-09-04 — The Home "playoff vs standings" rule
+Settled where a competition result lives: **playoff → CHAMPIONS card only** (via
+`compChampionId`); **clean 1st/2nd/3rd → Competition Results only**. `renderHomeCompetitions`
+filters `!compChampionId(n.id)`. The CHAMPIONS chip is `First "Nick" Surname` + date on row 1,
+night-type name on row 2 — nothing else (the `n.notes` capture text is dropped). DIDO always sits
+in CHAMPIONS. Commit `05647a9`.
+
 ### Migration ledger (Supabase, CJDA-relevant)
 
 ```
