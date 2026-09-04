@@ -523,12 +523,16 @@ wynandcarelse123@gmail.com` + `auth_user_id ec22be76-…` — he's admin **and**
 *Alexander Kloppers'* row (`6c33ccc7-…`) keeps `Alexander.Kloppers@Outlook.com` **unlinked** as
 the user's plain-player test identity; Hester Kloppers' row likewise. Commit `f7bb804` (doc).
 
-### 2026-09-04 — Home Alone Cup playoff; playoff champion for singles comps
+### 2026-09-04 — Playoffs for any competition; Home "Champions" card
 The TD had logged the Home Alone Cup (15 Jul 2026) block phase but not its knockout. Loaded the
 8-seed bracket into `night_playoff_matches` (QF+SF single-leg, Final best-of-5, Ruan beat Dirk
-3-2). Code: new `compChampionId(nightId)` = round-3 `winner_id`; `renderHomeCompetitions` shows a
-gold CHAMPION banner above the block standings for a singles comp with a playoff;
-`renderCompetitions` Winner column prefers it, else the block-standings topper. Commit `62884a5`.
+3-2). Then generalised: `renderDidoPlayoffs` renders for a DIDO night OR any `isCompNight` with an
+existing bracket (labels: "Playoffs"/"WINNER" for non-DIDO); the DIDO auto-generate branch stays
+DIDO-only. New `compChampionId(nightId)` = round-3 winner; `playerName(id)`. Home: the old "DIDO
+CHAMPIONS" card is now **"CHAMPIONS"** = `getAllChampions()` (every DIDO + comp playoff winner,
+chip labelled with the competition). `renderCompetitions` Winner column prefers the playoff champ,
+else block-standings topper; `renderHomeCompetitions` shows standings only. Commits `62884a5`,
+`b63b0fc`.
 
 ### 2026-09-04 — Phone-portrait CSS layer (≤640px only)
 The user's mobile UX was poor (horizontal scroll on the Season Log / Players tables, cramped
