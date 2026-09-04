@@ -1542,29 +1542,34 @@ async function updatePlayoffLegs(matchId, slot, val) {
 
 function renderDidoPlayoffs() {
   const night = state.activeNight;
-  if (!night || !nightIsDido(night)) return '';
-  const admin = isAdmin();
+  if (!night) return '';
   const nightId = night.id;
+  const isDido = nightIsDido(night);
   const matches = nightPlayoffMatches(nightId).slice().sort((a, b) => a.round - b.round || a.match_number - b.match_number);
+  // Show for DIDO nights (which can auto-generate a bracket) or any competition night that already has one.
+  if (!isDido && !(isCompNight(night.night_type_id) && matches.length)) return '';
+  const admin = isAdmin();
   const started = playoffPhaseStarted(nightId);
   const blocks = state.nightBlocks || [];
+  const kind = isDido ? 'DIDO ' : '';
 
   const shell = (inner) => `
     <div class="card" style="padding:14px;border-left:4px solid var(--green-accent)">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:0.08em;color:var(--text)">🏆 DIDO Playoffs</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:0.08em;color:var(--text)">🏆 ${kind}Playoffs</div>
         ${admin && matches.length ? `<button class="btn btn-ghost" style="font-size:0.7rem;padding:4px 10px;color:var(--red)" onclick="resetDidoPlayoffs()">Reset bracket</button>` : ''}
       </div>
       ${inner}
     </div>`;
 
-  // No playoff bracket — the night's winner is the block-standings leader.
-  const stdWinner = didoNightWinnerId(nightId);
+  // No playoff bracket — for DIDO, the night's winner is the block-standings leader.
+  const stdWinner = isDido ? didoNightWinnerId(nightId) : null;
   const stdBanner = stdWinner
-    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 DIDO WINNER — ${(state.players.find(x => x.id === stdWinner) || {}).first_name || ''} ${(state.players.find(x => x.id === stdWinner) || {}).last_name || ''}<div style="font-size:0.6rem;letter-spacing:0.06em;opacity:0.85;margin-top:2px">BY BLOCK STANDINGS · NO PLAYOFF</div></div>`
+    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 ${kind}WINNER — ${(state.players.find(x => x.id === stdWinner) || {}).first_name || ''} ${(state.players.find(x => x.id === stdWinner) || {}).last_name || ''}<div style="font-size:0.6rem;letter-spacing:0.06em;opacity:0.85;margin-top:2px">BY BLOCK STANDINGS · NO PLAYOFF</div></div>`
     : '';
 
   if (!matches.length) {
+    // (non-DIDO comps only reach here with a bracket; the guard above hides an empty panel)
     const q = didoQualifiers();
     const ready = q.length === 4 && q.every(x => x.first && x.second);
     if (!admin) return shell(`<div style="font-size:0.75rem;color:var(--text-muted)">${stdWinner ? 'No playoff was played this night.' : 'No playoff bracket yet.'}</div>${stdBanner}`);
@@ -1622,7 +1627,7 @@ function renderDidoPlayoffs() {
 
   const champ = didoNightWinner(nightId);
   const banner = champ
-    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 DIDO WINNER — ${nameOf(champ)}</div>`
+    ? `<div style="margin-top:12px;padding:10px 14px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:6px;text-align:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.1em">🏆 ${kind}WINNER — ${nameOf(champ)}</div>`
     : '';
 
   return shell(`
@@ -2561,15 +2566,8 @@ function renderHomeCompetitions() {
     const typeName = nt ? nt.name : 'Competition';
     const title = `${typeName}${n.notes ? ' · ' + pickerAttr(n.notes) : ''}`;
     if (isTeamComp(n)) return column(title, formatDate(n.date), teamRows(n));
-    // Singles competition — playoff champion (if any) on top, then per-block player standings.
-    const champ = playerName(compChampionId(n.id));
-    const champBanner = champ
-      ? `<div style="display:flex;align-items:center;gap:6px;background:linear-gradient(135deg,#8a6d00,#b8901a);border-radius:5px;padding:4px 8px;margin-bottom:8px">
-           <span>🏆</span><span style="font-size:0.78rem;font-weight:700;color:#fff">${champ}</span>
-           <span style="font-size:0.6rem;color:rgba(255,255,255,0.8);margin-left:auto">CHAMPION</span>
-         </div>`
-      : '';
-    const body = champBanner + getCompStandings(n.id).map(grp => {
+    // Singles competition — per-block player standings. (Playoff champions live in the CHAMPIONS card.)
+    const body = getCompStandings(n.id).map(grp => {
       const top3 = grp.players.slice(0, 3);
       return `
           <div style="margin-bottom:8px">
@@ -2696,14 +2694,14 @@ function renderHome() {
       </div><!-- end 3-col grid -->
 
       ${(() => {
-        const champs = getDidoChampions().slice(0, 6);
+        const champs = getAllChampions().slice(0, 12);
         if (!champs.length) return '';
         return `
-      <!-- DIDO Champions -->
+      <!-- Champions -->
       <div class="card" style="overflow:hidden">
         <div style="padding:8px 12px;background:var(--green-dark);border-bottom:1px solid var(--border)">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">🏆 DIDO CHAMPIONS</div>
-          <div style="font-size:0.65rem;color:var(--text-muted)">Winner of each DIDO night — playoff, or block standings</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:0.95rem;letter-spacing:0.1em">🏆 CHAMPIONS</div>
+          <div style="font-size:0.65rem;color:var(--text-muted)">Winner of every DIDO night &amp; competition playoff</div>
         </div>
         <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
           ${champs.map(c => `
@@ -2711,7 +2709,7 @@ function renderHome() {
               <span style="font-size:0.9rem">🏆</span>
               <div>
                 <div style="font-size:0.8rem;font-weight:700;color:var(--green-accent)">${c.name}</div>
-                <div style="font-size:0.62rem;color:var(--text-muted)">${formatDate(c.date)}</div>
+                <div style="font-size:0.62rem;color:var(--text-muted)">${c.comp} · ${formatDate(c.date)}</div>
               </div>
             </div>`).join('')}
         </div>
@@ -2740,6 +2738,27 @@ function getDidoChampions() {
       const pid = didoNightWinnerId(n.id);
       const p = pid && state.players.find(x => x.id === pid);
       return p ? { name: `${p.first_name} ${p.last_name}`, date: n.date, nightId: n.id, playerId: pid } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
+// Every crowned champion, newest first — DIDO night winners + any competition-night playoff champion.
+function getAllChampions() {
+  return (state.nights || [])
+    .filter(n => n.status === 'locked' || n.status === 'submitted')
+    .map(n => {
+      const nt = state.nightTypes.find(t => t.id === n.night_type_id);
+      const pid = nightIsDido(n)
+        ? didoNightWinnerId(n.id)
+        : (isCompNight(n.night_type_id) ? compChampionId(n.id) : null);
+      const p = pid && state.players.find(x => x.id === pid);
+      if (!p) return null;
+      return {
+        name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
+        playerId: pid, date: n.date, nightId: n.id,
+        comp: (nt ? nt.name : 'Competition') + (n.notes ? ' · ' + n.notes : ''),
+      };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
