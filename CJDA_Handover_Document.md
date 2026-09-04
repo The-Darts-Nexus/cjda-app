@@ -4,7 +4,12 @@
 > This file is the technical source of truth for the CJDA app. Keep it current — every
 > schema change, new engine, or business rule shift gets an entry in §14.7.
 >
-> **Last updated:** 2026-09-03 · **Assessment:** Business 9/10 · Technical **9/10**
+> **Last updated:** 2026-09-04 · **Assessment:** Business 9/10 · Technical **9/10**
+>
+> Latest work (2026-09-03 → 09-04): player self-registration + `player` role + DB-enforced
+> RLS lockdown (admin-only writes, space-scoped) + `dartsnexus@outlook.com` as platform
+> super-user; player profile page + photo upload; Players tab + GDF attendance redesigns;
+> Night Setup league-only fix; a phone-portrait (≤640px) CSS layer. All in §14.7.
 
 ---
 
@@ -12,8 +17,8 @@
 
 | | |
 |---|---|
-| **App** | Single file — [`index.html`](index.html) (~4,240 lines). No build step, no framework. |
-| **Front end** | Tailwind Play CDN + `@supabase/supabase-js@2` (UMD). One inline `<script>` from line ~122. |
+| **App** | Single file — [`index.html`](index.html) (~4,420 lines). No build step, no framework. Deployed at `cjda.dartsnexus.co.za` (push `main` → deploys). |
+| **Front end** | Tailwind Play CDN + `@supabase/supabase-js@2` (UMD). `<style>` at lines ~10–147 (incl. the ≤640px phone layer); one inline `<script>` from line ~153. |
 | **State** | One global `const state = {…}`. `render()` rebuilds `#root.innerHTML` on every change (full re-render). |
 | **Backend** | Supabase project `zsynlrutfkdjmmyznhst`. All data scoped to one space (`SPACE_ID = 00ca89b5-86f4-4c46-b853-0503796769de`, "Central Johannesburg Darts Association"). |
 | **Auth** | `sb.auth` email + password. Roles: `admin` (in `app_admins` **or** the `ADMIN_EMAILS` list) · `player` (auth user linked to a `players` row via `auth_user_id`) · `viewer` (signed in, not linked) · `guest`. Resolved by `resolveIdentity()` on every sign-in / session restore. Sign-up is invite-only — the email must already sit on an unclaimed `players` row. |
@@ -39,12 +44,14 @@ CJDA space. `fishontackle13@gmail.com` is a **Key West** admin and must never ap
 ## 14.1 Repository / File Structure
 
 There is no `src/`. The app is one HTML file. Logical "modules" are comment-banded
-sections of the inline script. Approximate map (line numbers drift — search by name):
+sections of the inline script. **The `~Lines` column is a rough guide that goes stale fast —
+navigate by the function/section names, which are stable.** (As of 2026-09-04 the file is
+~4,420 lines; earlier rows in this table were written against ~4,240 and drift low by ~150.)
 
 | Section | ~Lines | Responsibility |
 |---|---|---|
 | `<style>` (in `<head>`) | 10–150 | all CSS. A single `@media (max-width: 640px)` block holds the **phone-portrait** layer — reaches the inline-styled DOM via class hooks (`.app-title/.app-greeting/.app-logo`, `.dash-scroll`, `.log-tbl` frozen first 3 cols, `.players-tbl` + `data-col` hides). Tablet/desktop must never be affected — verify at 380px *and* 1200px. |
-| Config + Supabase init | 122–140 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPACE_ID`, `ADMIN_EMAILS`, `isAdminEmail()`, `sb` client |
+| Config + Supabase init | ~153–170 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPACE_ID`, `ADMIN_EMAILS`, `isAdminEmail()`, `sb` client |
 | App state | 141–190 | the `state` object (see §14.2) |
 | Utilities | 190–215 | `isAdmin`, `showToast`, `formatDate`, `ordinal` |
 | Auth | 214–300 | `resolveIdentity` (role + linked player), `signIn`, `signUp` (invite-gated), `requestPasswordReset`, `signOut`, `isAdmin`/`isPlayer`/`canEditProfile` |
@@ -510,6 +517,22 @@ itself on error) — used on the profile hero and Home Season Standings. Home Se
 name shows `nickname || first_name` (no surname); the Season Log tab keeps full names.
 Commit `5b9a3c9`.
 
+### 2026-09-03 — Wynie's login linked; test player identities
+DB data, not code: `players` row *Wynie Carelse* (`dd8218c7-…`) got `email
+wynandcarelse123@gmail.com` + `auth_user_id ec22be76-…` — he's admin **and** a linked player.
+*Alexander Kloppers'* row (`6c33ccc7-…`) keeps `Alexander.Kloppers@Outlook.com` **unlinked** as
+the user's plain-player test identity; Hester Kloppers' row likewise. Commit `f7bb804` (doc).
+
+### 2026-09-04 — Phone-portrait CSS layer (≤640px only)
+The user's mobile UX was poor (horizontal scroll on the Season Log / Players tables, cramped
+Home cards, oversized header); tablet/desktop are "perfect" and must not change. → one
+`@media (max-width: 640px)` block, reaching the inline-styled DOM via new class hooks:
+`.app-title`/`.app-greeting`/`.app-logo` (slim header, hide the greeting line), `.dash-scroll`
++ `.home-grid` (drop the fixed card heights → page scrolls, not nested scrollbars), `.log-tbl`
+(freeze the first 3 columns of the otherwise-unchanged Season Log table), `.players-tbl` +
+`data-col` (hide DSA/Nick/Cellphone on the roster). No JS. Verified identical desktop computed
+styles at 1200px. Commits `8bcbd1a`, `7beebc7` (doc). See [[mobile-responsive]] memory.
+
 ### Migration ledger (Supabase, CJDA-relevant)
 
 ```
@@ -519,14 +542,15 @@ Commit `5b9a3c9`.
 20260902155438  nights_end_date_and_comp_sessions
 20260903184031  add_players_nickname
 20260903191343  player_profile_fields
-20260903......  player_auth_linking        (players.auth_user_id, app_admins, is_app_admin())
-20260903......  rls_admin_write_lockdown   (all 16 CJDA tables: admin-only writes)
-20260903......  player_self_service_rpcs   (link_my_player, save_my_profile, set_my_photo)
-20260903......  space_scope_admins         (app_admins.space_id, is_space_admin(uuid), policies re-pointed)
-20260903......  link_my_player_space_scoped
-20260903......  platform_superadmin        (is_platform_superadmin() — dartsnexus@outlook.com, admin everywhere)
+20260903211756  player_auth_linking          (players.auth_user_id, app_admins, is_app_admin())
+20260903211805  rls_admin_write_lockdown     (all 16 CJDA tables: admin-only writes)
+20260903211819  player_self_service_rpcs     (link_my_player, save_my_profile, set_my_photo)
+20260903214048  space_scope_admins           (app_admins.space_id, is_space_admin(uuid), policies re-pointed)
+20260903214057  link_my_player_space_scoped
+20260903215003  platform_superadmin          (is_platform_superadmin() — dartsnexus@outlook.com, admin everywhere)
 + execute_sql (not migrations):  Drawn Doubles night_types row · player-photos bucket + policies
                                  (bucket write policy re-scoped to admin-or-own after the lockdown)
+                                 · Wynie's account link · Alexander's player email
 ```
 
 ---
@@ -577,9 +601,14 @@ the slip.
 
 ### Headless-Edge render harness
 Every change to `index.html` is verified by splicing the inline script into a stub page
-(`window.supabase` faked), calling the `render*()` functions with hand-built `state`, and
-asserting on the HTML string — no live browser, no Supabase round-trip. The inline script
-is lines 123 → `</script>−1`; getting that range wrong yields "Illegal return statement".
+(`window.supabase` faked — include `rpc`/`storage` on the stub since auth code calls them),
+calling the `render*()` functions with hand-built `state`, and asserting on the HTML string
+or `getComputedStyle` — no live browser, no Supabase round-trip. The inline script runs from
+just after `<script>` (~line 154) to `</script>−1`; getting that range wrong yields "Illegal
+return statement". For the ≤640px CSS layer, also splice in the `<style>` block and test at
+both 380px and 1200px window sizes (`msedge --headless=new --window-size=W,900`). DB-side
+policy/RPC changes are verified with impersonated JWTs via `execute_sql`
+(`set local role authenticated; set local request.jwt.claims = '{...}'`).
 
 ---
 
@@ -646,5 +675,6 @@ without extra onboarding.
 
 **Current:** Business 9/10 · Technical 9/10.
 **Remaining for 10/10 technical:** a generated ER diagram; per-function input/output tables
-for the render layer; a documented deployment/hosting path for `index.html`; and resolution
-of the `base_*` points questions in §14.8.
+for the render layer; the exact deploy/hosting mechanism for `cjda.dartsnexus.co.za` (what
+watches `main`); and resolution of the `base_*` / `contributes_selection` points questions in
+§14.8.
