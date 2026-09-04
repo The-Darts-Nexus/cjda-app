@@ -9,7 +9,9 @@
 > Latest work (2026-09-03 → 09-04): player self-registration + `player` role + DB-enforced
 > RLS lockdown (admin-only writes, space-scoped) + `dartsnexus@outlook.com` as platform
 > super-user; player profile page + photo upload; Players tab + GDF attendance redesigns;
-> Night Setup league-only fix; a phone-portrait (≤640px) CSS layer. All in §14.7.
+> Night Setup league-only fix; a phone-portrait (≤640px) CSS layer; **every competition type
+> unified** — flexible leg entry, sessions, conclude-vs-playoff, and playoffs (incl. team
+> playoffs) for all comp types, DIDO keeping its own seeding. All in §14.7.
 
 ---
 
@@ -17,7 +19,7 @@
 
 | | |
 |---|---|
-| **App** | Single file — [`index.html`](index.html) (~4,420 lines). No build step, no framework. Deployed at `cjda.dartsnexus.co.za` (push `main` → deploys). |
+| **App** | Single file — [`index.html`](index.html) (~4,660 lines). No build step, no framework. Deployed at `cjda.dartsnexus.co.za` (push `main` → deploys). |
 | **Front end** | Tailwind Play CDN + `@supabase/supabase-js@2` (UMD). `<style>` at lines ~10–147 (incl. the ≤640px phone layer); one inline `<script>` from line ~153. |
 | **State** | One global `const state = {…}`. `render()` rebuilds `#root.innerHTML` on every change (full re-render). |
 | **Backend** | Supabase project `zsynlrutfkdjmmyznhst`. All data scoped to one space (`SPACE_ID = 00ca89b5-86f4-4c46-b853-0503796769de`, "Central Johannesburg Darts Association"). |
@@ -191,7 +193,8 @@ Sel `2026-06-01 → 2027-05-01`.
 
 **`blocks`** — `night_id`, `game_type_id`, `block_label` ("Block 1"…), `size` (**CHECK 3–8**),
 `bonus` (per-player points added to everyone in the block), `status` (`open` \| `submitted` \|
-`locked`).
+`locked`), `session` (smallint, default 1 — groups a **competition's** blocks by session, same
+role as `comp_matches.session` for team comps; Wednesday/DIDO blocks are always session 1).
 
 **`block_players`** — `block_id`, `player_id`, `slot_index` (sheet row − 1), `sub_slot`
 (0 for singles; 0/1/2 for team formats).
@@ -205,12 +208,19 @@ Sel `2026-06-01 → 2027-05-01`.
 `6_bulls`), `value` (checkout value for HC/170; dart count for 15-dart; else 1). One row per
 occurrence. **Counted regardless of night type** — competition accolades feed player stats.
 
-### DIDO playoffs
+### Playoffs (DIDO + every competition)
 
-**`night_playoff_matches`** — `night_id`, `round` (1 = QF, 2 = SF, 3 = Final),
-`match_number`, `slot_a_seed`/`slot_b_seed` (1–8, null for SF/Final), `player_a_id`/
-`player_b_id`, `a_legs`/`b_legs`, `winner_id`, `best_of` (default 1). **Never contributes
-points** — separate from `results`.
+**`night_playoff_matches`** — `night_id`, `round` (1 = first round, **any bracket size**;
+the highest round is always the Final), `match_number`, `slot_a_seed`/`slot_b_seed` (round 1
+only), `a_legs`/`b_legs`, `best_of` (a display label + the generator's default legs, **not a
+constraint** — see §14.6), and **either**:
+- player match (DIDO, or any singles competition) → `player_a_id`/`player_b_id`/`winner_id`, or
+- team match (Selected/Drawn Doubles, Mixed Triples, Mix Doubles) → `team_a_id`/`team_b_id`/
+  `winner_team_id` (plain uuid, no FK, → `comp_teams.id`).
+
+A bracket is always internally one kind or the other — never mixed — inferred at runtime from
+which columns are populated (`recomputeBracket`/`renderPlayoffPanel`). **Never contributes
+points** — separate from `results`/`comp_matches`.
 
 ### Team competitions (Selected/Drawn Doubles, Mixed Triples, Mix Doubles)
 
@@ -244,7 +254,7 @@ seasons ─┬─ nights ─┬─ blocks ─┬─ block_players ── players
          │          │          └─ results ─────────┐
          │          ├─ accolades ──────────────────┤
          │          ├─ night_attendance ───────────┤
-         │          ├─ night_playoff_matches ──────┤   (DIDO only, no points)
+         │          ├─ night_playoff_matches ──────┤   (DIDO + every comp type, no points)
          │          ├─ comp_teams ─────────────────┤   (team comps only)
          │          └─ comp_matches                │
          └─ results.season_id, accolades.season_id │
@@ -301,6 +311,45 @@ Per `comp_teams` row, aggregate `comp_matches` across all sessions:
 `total = legsWon + gamesWon×2 + team.bonus`. Sort `total` desc → `legsWon` desc → `seed`.
 `getDoublesWinner` = `standings[0].name` when it has games played.
 
+### `legCap(nightTypeId)` → the leg-input `<input max>` for a night type
+
+**3** for the plain Wednesday league night only (`counts_match_points && !/dido/i.test(name)`);
+**99** (effectively unlimited) for DIDO and every competition — a match is decided by who won
+more legs, never by a fixed leg count. `playoffMatchComplete(a, b)` = `a !== b && a+b > 0`
+(same rule, for playoff matches). See §14.6.
+
+### `compRoundRobinStandings(nightId)` → one combined ranking for any competition
+
+Pure. Team comp → wraps `getDoublesStandings`. Singles comp → flattens every block **and
+session** of `getCompStandings` into one player list, summing each player's legs/games/total
+across all their matches. Feeds both the "Conclude — rank by round-robin" button and
+`generateCompPlayoffs`' seeding.
+
+### `generateCompPlayoffs(nightId, size)` → generic seeded bracket generator
+
+For any **non-DIDO** competition (DIDO keeps `generateDidoPlayoffs`, its own top-2-per-block
+seeding — see [[dido-playoffs]]). Takes the top `size` (4/8/16 singles, 4/8 team) of
+`compRoundRobinStandings`, seeds round 1 sequentially ((1,2)(3,4)(5,6)…), inserts empty rows
+for every later round, sets `player_a/b_id` or `team_a/b_id` depending on `isTeamComp`.
+Deletes any existing bracket for the night first.
+
+### `recomputeBracket(matches)` → advances winners through a bracket of **any size**
+
+Pure. `winnerOf(mt)` reads `player_a/b_id`+`winner_id` or `team_a/b_id`+`winner_team_id`
+(whichever the bracket uses) and requires `playoffMatchComplete`. For round `r > 1`, match `m`
+is fed by round `r-1` matches `2m-1` (slot a) and `2m` (slot b) — replaces the old hardcoded
+4-QF/2-SF/1-Final propagation. `persistPlayoffMatches` upserts including the team columns.
+
+### `renderPlayoffPanel(nightId)` (was `renderDidoPlayoffs` — old name kept as an alias)
+
+Renders for a DIDO night or any `isCompNight` night; `''` for Wednesday. With no bracket yet:
+DIDO shows its own "⚡ Generate Playoffs"; every other competition shows a **"Decided by:"**
+choice — *Conclude — rank by round-robin* (`submitNight()` / `setCompStatus('locked')`) or
+*Generate Playoffs* (a size `<select>` → `generateCompPlayoffs`, singles comps gated on the
+night being draft-saved/locked since the seeder reads `state.blocks`/`results`, not the
+in-memory sheet). With a bracket: renders `Math.max(round)` columns (`roundName` labels by
+distance from the final), team-or-player aware.
+
 ### `getBlockPositions(blockIdx)` (displayed block POS) vs `didoStateStandings` / `didoBlockStandings`
 
 - **`getBlockPositions`** — sort by total points **only**; ties broken by slot/row order
@@ -316,17 +365,20 @@ Per `comp_teams` row, aggregate `comp_matches` across all sessions:
 See §14.2. `submitNight` is admin-only, confirms, purges, writes `locked`, sets
 `nights.status`, reloads.
 
-### `didoNightWinnerId(nightId)`
+### `didoNightWinnerId(nightId)` / `compChampionId(nightId)` / `compChampionTeamId(nightId)`
 
-Playoff final `winner_id` if a bracket exists; else `null` if a bracket exists but the
-final isn't done; else the top of `didoStateStandings` (the "no-playoff, take it by
-standings" fallback).
+All three read `playoffFinalMatch(nightId)` (the match in the **highest** `round`, any bracket
+size) → its `winner_id` (players) or `winner_team_id` (teams). `didoNightWinnerId` additionally
+falls back to the top of `didoStateStandings` when DIDO has **no** playoff rows at all
+(the "no-playoff, take it by standings" case). `compChampionId`/`compChampionTeamId` return
+`null` with no bracket, and `null` if a bracket exists but the final isn't finished yet.
 
 ### `playerCompWins(playerId)` (profile)
 
-Outright winners only: winning `comp_teams` row of a locked team comp (from
-`getDoublesStandings[0]`), DIDO champions (`getDidoChampions`), or a singles-comp
-`night_playoff_matches` round-3 `winner_id`.
+Outright winners only: DIDO champions (`getDidoChampions`); for a **team** comp, the playoff
+winner (`compChampionTeamId`) if a bracket exists (not counted while the final is unfinished),
+else the round-robin leader (`getDoublesStandings[0]`) once locked; for a **singles** comp,
+`compChampionId`.
 
 ### Photo pipeline — `downscaleImage` + `uploadPlayerPhoto`
 
@@ -363,9 +415,10 @@ Do not change without written approval — each drives multiple engines.
 
 1. **A league night and a competition night never share a date.** Enforced by the
    create-night / capture guards, *not* a DB constraint.
-2. **DIDO playoff rounds award no season and no selection points.** They live in
-   `night_playoff_matches`, which the points engine never reads.
-3. **Only DIDO's block phase contributes match points.**
+2. **No playoff round, for any competition (DIDO or otherwise), ever awards season or
+   selection points.** They live in `night_playoff_matches`, which the points engine never
+   reads — only the round-robin/block phase (`results`/`comp_matches`) does.
+3. **Only DIDO's block phase contributes match points**, of the league night types.
 4. **Accolades always count toward player statistics**, regardless of night type
    (league or competition).
 5. **Team competitions (Selected/Drawn Doubles, Mixed Triples, Mix Doubles) do NOT feed
@@ -374,9 +427,12 @@ Do not change without written approval — each drives multiple engines.
    on `contributes_attendance` nights. The GDF calendar is a standalone federation tracker.
 7. **Season points and selection points use independent date ranges** that may overlap.
    Same formula: `legsWon + gamesWon×2 + blockBonus`.
-8. **Match formats:** Wednesday = 3 legs/match, most wins (valid 3-0, 2-1). DIDO 4+ player
-   block = 1 leg. DIDO 3-player block = best-of-3. Team comps = games-won based, per
-   `comp_matches`.
+8. **Leg entry is flexible everywhere except the plain Wednesday league night.** Wednesday
+   caps at 3 legs/match, most wins (valid 3-0, 2-1) — `legCap()` returns 3 only there. DIDO and
+   every competition (block phase **and** playoffs) are uncapped: whoever won more legs wins
+   the match, the number entered is never itself a constraint, only
+   `legsWon + gamesWon×2 + bonus` is read. `best_of` on a playoff match is a display label /
+   the generator's default, not an enforced length.
 9. **Block POS shown on the sheet has no head-to-head tie-break** (total points then row
    order). H2H exists only for DIDO seeding / DIDO winner.
 10. **Standings and the Season Log are always recomputed, never stored.**
@@ -551,6 +607,34 @@ filters `!compChampionId(n.id)`. The CHAMPIONS chip is `First "Nick" Surname` + 
 night-type name on row 2 — nothing else (the `n.notes` capture text is dropped). DIDO always sits
 in CHAMPIONS. Commit `05647a9`.
 
+### 2026-09-04 — Consistent competition format across every comp type
+Each competition behaved differently (team comps had sessions + a team grid; singles comps
+used the plain block sheet; only DIDO could generate a playoff; legs capped at 3/1 even though
+a comp match can be any length). Unified, Wednesday untouched:
+1. **Flexible legs everywhere but Wednesday** — new `legCap()`; `playoffMatchComplete` simplified
+   to `a !== b && a+b > 0`. See §14.6 #8.
+2. **Sessions on singles comps too** — `blocks.session` (new column, default 1); session tab
+   strip + `+ Session` in `renderBlockEntry`, gated on `isCompNight`.
+3. **Conclude vs Playoff choice** — once round-robin results exist, the admin picks *Conclude
+   — rank by round-robin* or *Generate Playoffs*, per competition.
+4. **Playoffs for every competition**, singles and **team** (Selected/Drawn Doubles, Mixed
+   Triples, Mix Doubles), bracket size 4/8/16 chosen per competition. DIDO **keeps its own**
+   top-2-per-block seeding (`generateDidoPlayoffs`, unchanged) — the new generic
+   `generateCompPlayoffs(nightId, size)` (seeded from new `compRoundRobinStandings`) is for
+   every other competition. `night_playoff_matches` gained `team_a_id`/`team_b_id`/
+   `winner_team_id` so one table serves player- and team-brackets (never mixed within a
+   bracket). `recomputeBracket` generalised from a hardcoded 4-QF/2-SF/1-Final to any bracket
+   size. `renderDidoPlayoffs` renamed `renderPlayoffPanel` (old name kept as an alias), now
+   called from both `renderBlockEntry` and `renderDoublesComp`.
+5. `getAllChampions`/`renderHomeCompetitions`/`renderCompetitions` extended so a **team**
+   playoff champion surfaces on Home CHAMPIONS and drops out of Competition Results, exactly
+   like a singles playoff champion already did (the §14.7 2026-09-04 "Home rule", above).
+
+Verified via a 38-assertion headless-Edge harness (incl. `recomputeBracket` re-checked against
+the real stored 8-seed DIDO/Home Alone Cup bracket shapes for byte-identical propagation) plus
+a full regression sweep of every prior harness this session — no genuine regressions. Migration
+`comp_flexible_playoffs`. Commit `ffd0afb`. See [[dido-playoffs]], [[team-competitions]].
+
 ### Migration ledger (Supabase, CJDA-relevant)
 
 ```
@@ -566,6 +650,7 @@ in CHAMPIONS. Commit `05647a9`.
 20260903214048  space_scope_admins           (app_admins.space_id, is_space_admin(uuid), policies re-pointed)
 20260903214057  link_my_player_space_scoped
 20260903215003  platform_superadmin          (is_platform_superadmin() — dartsnexus@outlook.com, admin everywhere)
+20260904         comp_flexible_playoffs       (blocks.session; night_playoff_matches.team_a_id/team_b_id/winner_team_id)
 + execute_sql (not migrations):  Drawn Doubles night_types row · player-photos bucket + policies
                                  (bucket write policy re-scoped to admin-or-own after the lockdown)
                                  · Wynie's account link · Alexander's player email
@@ -584,7 +669,8 @@ in CHAMPIONS. Commit `05647a9`.
 | ~19 early auth accounts exist with no linked player (public sign-up was open before the invite gate). | Low | **Open** — they're plain `viewer`s and can't write anything. They auto-link if the TD later puts their email on a `players` row. |
 | Missing Wednesday league nights: **2026-01-28, 2026-03-25, 2026-06-03, 2026-07-15**. | Low | **Open** — unconfirmed whether played. All other Wednesdays 12 Nov 2025 → 2 Sep 2026 are captured; Dec/early-Jan + 1 Apr (Easter) were scheduled breaks. |
 | Perfect 3-way cycle blocks: the app shows 1/2/3, the paper sheet marks all Pos 1. | Cosmetic | **Won't fix** — `getBlockPositions` cannot represent a tie; totals are identical so nothing downstream is wrong. |
-| Singles competitions (CoC / Home Alone / Open) have no data and only playoff-final winner detection in `playerCompWins`. | Low | **Open** — revisit if those competitions are ever run. |
+| ~~Singles competitions (CoC / Home Alone / Open) have no data and only playoff-final winner detection in `playerCompWins`.~~ | — | **Resolved 2026-09-04** — every competition type (singles and team) now has the same conclude-vs-playoff flow, flexible legs, and sessions; `playerCompWins` reads any bracket size. |
+| ~~Leg entry capped at 3 (or 1 for DIDO) even though a competition match can be any length.~~ | — | **Resolved 2026-09-04** — `legCap()`; Wednesday still caps at 3. |
 | 2026-09-02 night lost blocks 4 & 5 during a pre-`slotPlayerId` submit crash. | — | **Resolved** — reopened + re-entered; `slotPlayerId` fix shipped. |
 | Profile Save wiped `players.photo_url` (stale-draft spread by `savePlayer`). | — | **Resolved** `5b9a3c9` — `saveProfileEdit` now patches a field whitelist. |
 | Home "Competition Results" used to hide older competitions (grouped by type, latest only). | — | **Resolved** `a25ca67` — now one column per completed competition. |
